@@ -4,10 +4,14 @@ const { auth } = require('../middleware/auth');
 const { uploadSingle } = require('../middleware/upload');
 
 const controller = require('../controllers/urlController');
+const analyticsController = require('../controllers/analyticsController'); // Import analytics controller
 
-// Dashboard endpoints
+// Dashboard endpoints - use analytics controller for overall analytics
 router.get('/dashboard-stats', auth, controller.getDashboardStats);
 router.get('/recent-urls', auth, controller.getRecentUrls);
+
+// Overall analytics endpoint
+router.get('/overall-analytics', auth, analyticsController.getOverallAnalytics);
 
 // Core operations
 router.post('/shorten', auth, controller.shortenUrl);
@@ -23,7 +27,7 @@ router.get('/:id', auth, controller.getUrl);
 router.put('/:id', auth, controller.updateUrl);
 router.delete('/:id', auth, controller.deleteUrl);
 
-// Analytics
+// Analytics - Use the updated function from urlController
 router.get('/:id/analytics', auth, controller.getUrlAnalytics);
 router.get('/:id/export', auth, controller.exportUrlAnalytics);
 

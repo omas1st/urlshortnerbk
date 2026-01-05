@@ -99,6 +99,54 @@ const sanitizeDestinations = (destinations) => {
   return cleaned;
 };
 
+// Helper function to calculate date range (same as in analytics controller)
+const getDateRange = (range, customStartDate, customEndDate) => {
+  const now = new Date();
+  let startDate;
+  let endDate = now;
+  
+  switch (range) {
+    case 'today':
+      startDate = new Date(now);
+      startDate.setHours(0, 0, 0, 0);
+      break;
+    case '7days':
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 7);
+      break;
+    case '30days':
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 30);
+      break;
+    case '90days':
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 90);
+      break;
+    case '180days':
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 180);
+      break;
+    case '365days':
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 365);
+      break;
+    case 'all':
+      startDate = new Date(0); // Beginning of time
+      break;
+    case 'custom':
+      startDate = customStartDate ? new Date(customStartDate) : new Date(now);
+      startDate.setHours(0, 0, 0, 0);
+      endDate = customEndDate ? new Date(customEndDate) : now;
+      endDate.setHours(23, 59, 59, 999);
+      break;
+    default:
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 7);
+  }
+  
+  return { startDate, endDate };
+};
+
 /**
  * shortenUrl
  */
@@ -605,61 +653,274 @@ const deleteUrl = async (req, res) => {
 };
 
 /**
- * getUrlAnalytics
+ * getUrlAnalytics - Enhanced version for all time ranges
  */
 const getUrlAnalytics = async (req, res) => {
   try {
     const id = req.params.id;
     const range = req.query.range || '7days';
+    const customStartDate = req.query.startDate;
+    const customEndDate = req.query.endDate;
 
     const url = await Url.findOne({ _id: id, user: req.user._id });
     if (!url) return res.status(404).json({ success: false, message: 'URL not found' });
 
-    const analytics = await url.getAnalytics(range);
-    const topCountries = (typeof Click.getTopCountries === 'function')
-      ? await Click.getTopCountries(url._id, 10).catch(() => [])
-      : [];
+    // Calculate date range
+    const { startDate, endDate } = getDateRange(range, customStartDate, customEndDate);
+    
+    console.log(`Getting analytics for URL ${id}, range: ${range}, dates: ${startDate} to ${endDate}`);
 
-    // build browser distribution defensively
-    const browserDistribution = (analytics.browsers || []).reduce((acc, b) => {
-      const key = `${b.browser || 'Unknown'} ${b.version || ''}`.trim();
-      acc[key] = b.clicks || 0;
-      return acc;
-    }, {});
+    // Get analytics using aggregation for better performance
+    const analytics = await Click.aggregate([
+      {
+        $match: {
+          urlId: url._id,
+          timestamp: { $gte: startDate, $lte: endDate },
+          isBot: false
+        }
+      },
+      {
+        $facet: {
+          // Basic stats
+          basicStats: [
+            {
+              $group: {
+                _id: null,
+                totalClicks: { $sum: 1 },
+                uniqueClicks: { $addToSet: '$ipAddress' },
+                returningVisitors: { $sum: { $cond: ['$isReturning', 1, 0] } },
+                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } },
+                totalTimeOnPage: { $sum: '$timeOnPage' },
+                totalScrollDepth: { $sum: '$scrollDepth' },
+                clicksWithTimeToClick: { $sum: { $cond: ['$timeToClick', 1, 0] } },
+                totalTimeToClick: { $sum: '$timeToClick' }
+              }
+            }
+          ],
+          
+          // Time series - adjust grouping for all time
+          timeSeries: [
+            {
+              $group: {
+                _id: {
+                  $dateToString: { 
+                    format: range === 'all' ? '%Y-%m' : '%Y-%m-%d', 
+                    date: '$timestamp' 
+                  }
+                },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { _id: 1 } }
+          ],
+          
+          // Countries
+          countries: [
+            {
+              $match: {
+                country: { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: '$country',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+          ],
+          
+          // Devices
+          devices: [
+            {
+              $group: {
+                _id: '$device',
+                count: { $sum: 1 }
+              }
+            }
+          ],
+          
+          // Recent clicks
+          recentClicks: [
+            { $sort: { timestamp: -1 } },
+            { $limit: 10 }
+          ],
+          
+          // Peak hour
+          peakHour: [
+            {
+              $group: {
+                _id: { $hour: '$timestamp' },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 1 }
+          ],
+          
+          // Referrers
+          referrers: [
+            {
+              $match: {
+                referrerDomain: { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: '$referrerDomain',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 5 }
+          ]
+        }
+      }
+    ]);
 
-    const now = new Date();
-    let startDate;
-    switch (range) {
-      case 'today':
-        startDate = new Date(now.setHours(0, 0, 0, 0));
-        break;
-      case '7days':
-        startDate = new Date(now.setDate(now.getDate() - 7));
-        break;
-      default:
-        startDate = new Date(0);
-    }
-    const timeSeries = typeof Click.getTimeSeries === 'function'
-      ? await Click.getTimeSeries(url._id, startDate, new Date(), 'day').catch(() => [])
-      : (analytics.timeSeries || []);
-
+    const stats = analytics[0];
+    const basicStats = stats.basicStats[0] || { 
+      totalClicks: 0, 
+      uniqueClicks: [], 
+      returningVisitors: 0,
+      conversions: 0,
+      totalTimeOnPage: 0,
+      totalScrollDepth: 0,
+      clicksWithTimeToClick: 0,
+      totalTimeToClick: 0
+    };
+    
+    const totalClicks = basicStats.totalClicks || 0;
+    const uniqueClicks = basicStats.uniqueClicks ? basicStats.uniqueClicks.length : 0;
+    const returningVisitors = basicStats.returningVisitors || 0;
+    const conversions = basicStats.conversions || 0;
+    
+    // Calculate metrics
+    const conversionRate = totalClicks > 0 ? ((conversions / totalClicks) * 100).toFixed(1) : 0;
+    const avgTimeOnPage = basicStats.totalTimeOnPage && totalClicks > 0 
+      ? Math.floor(basicStats.totalTimeOnPage / totalClicks)
+      : 0;
+      
+    const avgScrollDepth = basicStats.totalScrollDepth && totalClicks > 0
+      ? Math.round((basicStats.totalScrollDepth / totalClicks) * 100)
+      : 0;
+      
+    const avgTimeToClick = basicStats.totalTimeToClick && basicStats.clicksWithTimeToClick > 0
+      ? Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)
+      : 0;
+    
+    // Time series
+    const timeSeriesData = stats.timeSeries || [];
+    const clicksOverTime = {
+      labels: timeSeriesData.map(item => {
+        const dateStr = item._id;
+        if (range === 'all' && /^\d{4}-\d{2}$/.test(dateStr)) {
+          const [year, month] = dateStr.split('-');
+          const date = new Date(year, month - 1);
+          return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+        } else {
+          try {
+            const date = new Date(dateStr);
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          } catch {
+            return dateStr;
+          }
+        }
+      }),
+      values: timeSeriesData.map(item => item.count)
+    };
+    
+    // Countries
+    const countryData = stats.countries || [];
+    const topCountries = {
+      rawData: countryData.map(item => ({
+        country: item._id,
+        visits: item.count
+      })),
+      countries: countryData.map(item => item._id),
+      visits: countryData.map(item => item.count)
+    };
+    
+    // Devices - FIXED: Return proper object format expected by frontend
+    const deviceData = stats.devices || [];
+    const deviceDistribution = {
+      desktop: 0,
+      mobile: 0,
+      tablet: 0,
+      other: 0
+    };
+    
+    deviceData.forEach(item => {
+      const deviceType = (item._id || '').toLowerCase();
+      if (deviceType.includes('desktop')) {
+        deviceDistribution.desktop = item.count;
+      } else if (deviceType.includes('mobile')) {
+        deviceDistribution.mobile = item.count;
+      } else if (deviceType.includes('tablet')) {
+        deviceDistribution.tablet = item.count;
+      } else {
+        deviceDistribution.other = item.count;
+      }
+    });
+    
+    // Calculate engagement metrics
+    const engagedClicks = await Click.countDocuments({
+      urlId: url._id,
+      timestamp: { $gte: startDate, $lte: endDate },
+      isBot: false,
+      timeOnPage: { $gt: 30 } // Consider engaged if spent more than 30 seconds
+    });
+    
+    const bounceRate = totalClicks > 0 ? Math.round(((totalClicks - engagedClicks) / totalClicks) * 100) : 0;
+    const engagement = {
+      bounced: Math.round(totalClicks * (bounceRate / 100)),
+      engaged: engagedClicks,
+      bounceRate: bounceRate
+    };
+    
+    // Peak hour
+    const peakHourData = stats.peakHour[0];
+    const peakHour = peakHourData ? `${peakHourData._id}:00` : 'N/A';
+    
+    // Top referrer
+    const topReferrerData = stats.referrers[0];
+    const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
+    
+    // Recent clicks
+    const recentClicks = stats.recentClicks || [];
+    
     return res.json({
       success: true,
       analytics: {
-        totalClicks: analytics.totalClicks,
-        uniqueClicks: analytics.uniqueClicks,
-        conversionRate: analytics.conversionRate,
-        avgTimeOnPage: analytics.avgTimeOnPage,
-        avgScrollDepth: analytics.avgScrollDepth,
-        returningVisitors: analytics.returningVisitors,
-        newVisitors: analytics.newVisitors,
+        totalClicks,
+        uniqueClicks,
+        returningVisitors,
+        conversionRate: `${conversionRate}%`,
+        clicksOverTime,
         topCountries,
-        deviceDistribution: analytics.clicksByDevice || {},
-        browserDistribution,
-        timeSeries,
-        referrers: analytics.referrers || {}
+        deviceDistribution, // Now returns proper object format
+        engagement,
+        recentClicks: recentClicks.map(click => ({
+          timestamp: click.timestamp,
+          ipAddress: click.ipAddress ? click.ipAddress.substring(0, 8) + '...' : 'N/A',
+          country: click.country || 'Unknown',
+          device: click.device || 'Unknown',
+          browser: click.browser || 'Unknown',
+          referrer: click.referrer || 'Direct'
+        })),
+        detailedMetrics: {
+          avgTimeToClick: avgTimeToClick > 0 ? `${avgTimeToClick}s` : 'N/A',
+          avgScrollDepth: avgScrollDepth > 0 ? `${avgScrollDepth}%` : 'N/A',
+          avgSessionDuration: avgTimeOnPage > 0 ? `${avgTimeOnPage}s` : 'N/A',
+          peakHour,
+          topReferrer,
+          pagesPerSession: (engagedClicks > 0 ? (totalClicks / engagedClicks).toFixed(1) : 1.0),
+          conversionRate: `${conversionRate}%`
+        }
       }
     });
+    
   } catch (error) {
     console.error('Get URL analytics error:', error);
     return res.status(500).json({ success: false, message: 'Failed to get analytics' });
@@ -1003,8 +1264,6 @@ const bulkOperations = async (req, res) => {
   }
 };
 
-// Add these functions to existing urlController.js
-
 /**
  * Update URL status (activate/deactivate)
  */
@@ -1084,37 +1343,38 @@ const getUrlByShortId = async (req, res) => {
   }
 };
 
-// Update exportAnalytics function in urlController.js
+/**
+ * exportUrlAnalytics
+ */
 const exportUrlAnalytics = async (req, res) => {
   try {
     const { id } = req.params;
-    const { format = 'csv', startDate, endDate } = req.query;
+    const { format = 'csv', range = 'all', startDate, endDate } = req.query;
 
     const url = await Url.findOne({ _id: id, user: req.user._id });
     if (!url) {
       return res.status(404).json({ success: false, message: 'URL not found' });
     }
 
-    const filter = { urlId: url._id };
-    if (startDate || endDate) {
-      filter.timestamp = {};
-      if (startDate) filter.timestamp.$gte = new Date(startDate);
-      if (endDate) filter.timestamp.$lte = new Date(endDate);
-    }
+    // Calculate date range
+    const dateRange = getDateRange(range, startDate, endDate);
+    const filter = { urlId: url._id, timestamp: { $gte: dateRange.startDate, $lte: dateRange.endDate } };
 
     const clicks = await Click.find(filter)
       .sort({ timestamp: -1 })
       .lean();
 
     if (format === 'csv') {
-      const headers = ['Timestamp', 'IP Address', 'Country', 'Device', 'Browser', 'Referrer'];
+      const headers = ['Timestamp', 'IP Address', 'Country', 'Device', 'Browser', 'Referrer', 'Time on Page (s)', 'Scroll Depth (%)'];
       const rows = clicks.map(click => [
         new Date(click.timestamp).toISOString(),
         click.ipAddress || 'N/A',
         click.country || 'Unknown',
         click.device || 'Unknown',
         click.browser || 'Unknown',
-        click.referrer || 'Direct'
+        click.referrer || 'Direct',
+        click.timeOnPage || '0',
+        click.scrollDepth || '0'
       ]);
 
       const csvContent = [
@@ -1132,7 +1392,10 @@ const exportUrlAnalytics = async (req, res) => {
         metadata: {
           total: clicks.length,
           url: url.shortId,
-          exportedAt: new Date().toISOString()
+          exportedAt: new Date().toISOString(),
+          range,
+          startDate: dateRange.startDate,
+          endDate: dateRange.endDate
         }
       });
     }
@@ -1150,10 +1413,10 @@ module.exports = {
   updateUrlStatus,
   getUrlByShortId,
   exportUrlAnalytics,
+  getUrlAnalytics,
   getUrl,
   updateUrl,
   deleteUrl,
-  getUrlAnalytics,
   getUrlVersions,
   rollbackToVersion,
   enableABTesting,

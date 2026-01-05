@@ -81,7 +81,7 @@ const getOverallAnalytics = async (req, res) => {
           clicksOverTime: { labels: [], values: [] },
           topCountries: { countries: [], visits: [] },
           deviceDistribution: { desktop: 0, mobile: 0, tablet: 0 },
-          engagement: { bounced: 0, engaged: 0 },
+          engagement: { bounced: 0, engaged: 0, bounceRate: 0 },
           recentClicks: [],
           detailedMetrics: {
             avgTimeToClick: '0s',
@@ -117,17 +117,21 @@ const getOverallAnalytics = async (req, res) => {
                 totalTimeOnPage: { $sum: '$timeOnPage' },
                 totalScrollDepth: { $sum: '$scrollDepth' },
                 clicksWithTimeToClick: { $sum: { $cond: ['$timeToClick', 1, 0] } },
-                totalTimeToClick: { $sum: '$timeToClick' }
+                totalTimeToClick: { $sum: '$timeToClick' },
+                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } }
               }
             }
           ],
           
-          // Clicks by date for time series
+          // Clicks by date for time series - adjust grouping based on range
           timeSeries: [
             {
               $group: {
                 _id: {
-                  $dateToString: { format: '%Y-%m-%d', date: '$timestamp' }
+                  $dateToString: { 
+                    format: range === 'all' ? '%Y-%m' : '%Y-%m-%d', 
+                    date: '$timestamp' 
+                  }
                 },
                 count: { $sum: 1 }
               }
@@ -194,20 +198,47 @@ const getOverallAnalytics = async (req, res) => {
               }
             },
             { $sort: { count: -1 } },
-            { $limit: 1 }
+            { $limit: 5 }
+          ],
+          
+          // Browser stats
+          browsers: [
+            {
+              $match: {
+                browser: { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: '$browser',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 5 }
           ]
         }
       }
     ]);
 
     const stats = clickStats[0];
-    const basicStats = stats.basicStats[0] || { totalClicks: 0, uniqueIPs: [], returningVisitors: 0 };
+    const basicStats = stats.basicStats[0] || { 
+      totalClicks: 0, 
+      uniqueIPs: [], 
+      returningVisitors: 0, 
+      totalTimeOnPage: 0,
+      totalScrollDepth: 0,
+      clicksWithTimeToClick: 0,
+      totalTimeToClick: 0,
+      conversions: 0
+    };
     
     const totalClicks = basicStats.totalClicks || 0;
     const uniqueVisitors = basicStats.uniqueIPs ? basicStats.uniqueIPs.length : 0;
     const returningVisitors = basicStats.returningVisitors || 0;
+    const conversions = basicStats.conversions || 0;
     
-    // Calculate detailed metrics
+    // Calculate detailed metrics based on actual data
     const avgTimeOnPage = basicStats.totalTimeOnPage && totalClicks > 0 
       ? `${Math.floor(basicStats.totalTimeOnPage / totalClicks)}s`
       : '0s';
@@ -218,19 +249,33 @@ const getOverallAnalytics = async (req, res) => {
       
     const avgTimeToClick = basicStats.totalTimeToClick && basicStats.clicksWithTimeToClick > 0
       ? `${Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)}s`
-      : '2.5s';
+      : 'N/A';
     
     const peakHourData = stats.peakHour[0];
     const peakHour = peakHourData ? `${peakHourData._id}:00` : 'N/A';
     
-    const topReferrer = stats.referrers[0] ? stats.referrers[0]._id : 'Direct';
+    const topReferrerData = stats.referrers[0];
+    const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
     
-    // Time series data
+    // Time series data with proper formatting
     const timeSeriesData = stats.timeSeries || [];
     const clicksOverTime = {
       labels: timeSeriesData.map(item => {
-        const date = new Date(item._id);
-        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const dateStr = item._id;
+        if (range === 'all' && /^\d{4}-\d{2}$/.test(dateStr)) {
+          // Format as "Jan 2024" for monthly data
+          const [year, month] = dateStr.split('-');
+          const date = new Date(year, month - 1);
+          return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+        } else {
+          // Format as "MMM DD" for daily data
+          try {
+            const date = new Date(dateStr);
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          } catch {
+            return dateStr;
+          }
+        }
       }),
       values: timeSeriesData.map(item => item.count)
     };
@@ -265,24 +310,41 @@ const getOverallAnalytics = async (req, res) => {
       }
     });
     
-    // Engagement data (simplified bounce rate calculation)
-    const bounceRate = Math.min(70, Math.max(10, Math.random() * 60));
+    // Calculate actual bounce rate from engaged vs bounced
+    const engagedClicks = await Click.countDocuments({
+      urlId: { $in: urlIds },
+      timestamp: { $gte: startDate, $lte: endDate },
+      isBot: false,
+      timeOnPage: { $gt: 30 } // Consider engaged if spent more than 30 seconds
+    });
+    
+    const bounceRate = totalClicks > 0 ? Math.round(((totalClicks - engagedClicks) / totalClicks) * 100) : 0;
     const engagement = {
       bounced: Math.round(totalClicks * (bounceRate / 100)),
-      engaged: Math.round(totalClicks * ((100 - bounceRate) / 100)),
-      bounceRate: bounceRate.toFixed(1)
+      engaged: engagedClicks,
+      bounceRate: bounceRate
     };
     
     // Recent clicks
     const recentClicks = stats.recentClicks || [];
     
+    // Browser distribution
+    const browserData = stats.browsers || [];
+    const browserDistribution = browserData.map(browser => ({
+      browser: browser._id,
+      count: browser.count
+    }));
+    
+    // Calculate actual conversion rate
+    const conversionRate = totalClicks > 0 ? ((conversions / totalClicks) * 100).toFixed(1) : 0;
+    
     res.json({
       success: true,
       analytics: {
         totalClicks,
-        uniqueVisitors,
+        uniqueVisitors: uniqueVisitors,
         returningVisitors,
-        conversionRate: `${(Math.random() * 15).toFixed(1)}%`,
+        conversionRate: `${conversionRate}%`,
         totalUrls: urlIds.length,
         topUrls: userUrls.slice(0, 5).map(url => ({
           id: url._id,
@@ -309,8 +371,8 @@ const getOverallAnalytics = async (req, res) => {
           avgSessionDuration: avgTimeOnPage,
           peakHour,
           topReferrer,
-          pagesPerSession: (Math.random() * 2 + 1).toFixed(1),
-          conversionRate: `${(Math.random() * 15).toFixed(1)}%`
+          pagesPerSession: (engagedClicks > 0 ? (totalClicks / engagedClicks).toFixed(1) : 1.0),
+          conversionRate: `${conversionRate}%`
         }
       }
     });
@@ -377,12 +439,15 @@ const getUrlAnalytics = async (req, res) => {
             }
           ],
           
-          // Time series
+          // Time series - adjust grouping based on range
           timeSeries: [
             {
               $group: {
                 _id: {
-                  $dateToString: { format: '%Y-%m-%d', date: '$timestamp' }
+                  $dateToString: { 
+                    format: range === 'all' ? '%Y-%m' : '%Y-%m-%d', 
+                    date: '$timestamp' 
+                  }
                 },
                 count: { $sum: 1 }
               }
@@ -449,21 +514,30 @@ const getUrlAnalytics = async (req, res) => {
               }
             },
             { $sort: { count: -1 } },
-            { $limit: 1 }
+            { $limit: 5 }
           ]
         }
       }
     ]);
 
     const stats = clickStats[0];
-    const basicStats = stats.basicStats[0] || { totalClicks: 0, uniqueIPs: [], returningVisitors: 0 };
+    const basicStats = stats.basicStats[0] || { 
+      totalClicks: 0, 
+      uniqueIPs: [], 
+      returningVisitors: 0,
+      totalTimeOnPage: 0,
+      totalScrollDepth: 0,
+      clicksWithTimeToClick: 0,
+      totalTimeToClick: 0,
+      conversions: 0
+    };
     
     const totalClicks = basicStats.totalClicks || 0;
     const uniqueVisitors = basicStats.uniqueIPs ? basicStats.uniqueIPs.length : 0;
     const returningVisitors = basicStats.returningVisitors || 0;
     const conversions = basicStats.conversions || 0;
     
-    // Calculate metrics
+    // Calculate metrics based on actual data
     const avgTimeOnPage = basicStats.totalTimeOnPage && totalClicks > 0 
       ? `${Math.floor(basicStats.totalTimeOnPage / totalClicks)}s`
       : '0s';
@@ -474,7 +548,7 @@ const getUrlAnalytics = async (req, res) => {
       
     const avgTimeToClick = basicStats.totalTimeToClick && basicStats.clicksWithTimeToClick > 0
       ? `${Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)}s`
-      : '2.5s';
+      : 'N/A';
     
     const conversionRate = totalClicks > 0 
       ? `${((conversions / totalClicks) * 100).toFixed(1)}%`
@@ -483,14 +557,28 @@ const getUrlAnalytics = async (req, res) => {
     const peakHourData = stats.peakHour[0];
     const peakHour = peakHourData ? `${peakHourData._id}:00` : 'N/A';
     
-    const topReferrer = stats.referrers[0] ? stats.referrers[0]._id : 'Direct';
+    const topReferrerData = stats.referrers[0];
+    const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
     
-    // Time series
+    // Time series with proper formatting
     const timeSeriesData = stats.timeSeries || [];
     const clicksOverTime = {
       labels: timeSeriesData.map(item => {
-        const date = new Date(item._id);
-        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const dateStr = item._id;
+        if (range === 'all' && /^\d{4}-\d{2}$/.test(dateStr)) {
+          // Format as "Jan 2024" for monthly data
+          const [year, month] = dateStr.split('-');
+          const date = new Date(year, month - 1);
+          return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+        } else {
+          // Format as "MMM DD" for daily data
+          try {
+            const date = new Date(dateStr);
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          } catch {
+            return dateStr;
+          }
+        }
       }),
       values: timeSeriesData.map(item => item.count)
     };
@@ -523,12 +611,19 @@ const getUrlAnalytics = async (req, res) => {
       }
     });
     
-    // Engagement
-    const bounceRate = Math.min(70, Math.max(10, Math.random() * 60));
+    // Calculate actual engagement metrics
+    const engagedClicks = await Click.countDocuments({
+      urlId: id,
+      timestamp: { $gte: startDate, $lte: endDate },
+      isBot: false,
+      timeOnPage: { $gt: 30 } // Consider engaged if spent more than 30 seconds
+    });
+    
+    const bounceRate = totalClicks > 0 ? Math.round(((totalClicks - engagedClicks) / totalClicks) * 100) : 0;
     const engagement = {
       bounced: Math.round(totalClicks * (bounceRate / 100)),
-      engaged: Math.round(totalClicks * ((100 - bounceRate) / 100)),
-      bounceRate: bounceRate.toFixed(1)
+      engaged: engagedClicks,
+      bounceRate: bounceRate
     };
     
     // Recent clicks
@@ -559,7 +654,7 @@ const getUrlAnalytics = async (req, res) => {
           avgSessionDuration: avgTimeOnPage,
           peakHour,
           topReferrer,
-          pagesPerSession: (Math.random() * 2 + 1).toFixed(1),
+          pagesPerSession: (engagedClicks > 0 ? (totalClicks / engagedClicks).toFixed(1) : 1.0),
           conversionRate
         }
       }
@@ -600,7 +695,7 @@ const getAdminAnalytics = async (req, res) => {
       Url.find().sort({ createdAt: -1 }).limit(5).populate('user', 'username email').lean()
     ]);
     
-    // Get clicks over time for admin
+    // Get clicks over time for admin - adjust grouping for all time
     const timeSeriesData = await Click.aggregate([
       {
         $match: {
@@ -611,7 +706,10 @@ const getAdminAnalytics = async (req, res) => {
       {
         $group: {
           _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$timestamp' }
+            $dateToString: { 
+              format: range === 'all' ? '%Y-%m' : '%Y-%m-%d', 
+              date: '$timestamp' 
+            }
           },
           count: { $sum: 1 }
         }
@@ -621,8 +719,19 @@ const getAdminAnalytics = async (req, res) => {
     
     const clicksOverTime = {
       labels: timeSeriesData.map(item => {
-        const date = new Date(item._id);
-        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const dateStr = item._id;
+        if (range === 'all' && /^\d{4}-\d{2}$/.test(dateStr)) {
+          const [year, month] = dateStr.split('-');
+          const date = new Date(year, month - 1);
+          return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+        } else {
+          try {
+            const date = new Date(dateStr);
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          } catch {
+            return dateStr;
+          }
+        }
       }),
       values: timeSeriesData.map(item => item.count)
     };
@@ -668,7 +777,10 @@ const getAdminAnalytics = async (req, res) => {
       {
         $group: {
           _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
+            $dateToString: { 
+              format: range === 'all' ? '%Y-%m' : '%Y-%m-%d', 
+              date: '$createdAt' 
+            }
           },
           count: { $sum: 1 }
         }
@@ -691,21 +803,32 @@ const getAdminAnalytics = async (req, res) => {
           shortId: url.shortId,
           destination: url.destinationUrl.substring(0, 50) + '...',
           owner: url.user?.username || 'Unknown',
-          clicks: 0 // You might want to populate this with actual click counts
+          clicks: 0
         })),
         clicksOverTime,
         topUrls: populatedTopUrls,
         userRegistrations: {
           labels: userRegistrations.map(item => {
-            const date = new Date(item._id);
-            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            const dateStr = item._id;
+            if (range === 'all' && /^\d{4}-\d{2}$/.test(dateStr)) {
+              const [year, month] = dateStr.split('-');
+              const date = new Date(year, month - 1);
+              return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+            } else {
+              try {
+                const date = new Date(dateStr);
+                return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+              } catch {
+                return dateStr;
+              }
+            }
           }),
           values: userRegistrations.map(item => item.count)
         },
         systemHealth: {
           uptime: process.uptime(),
           memoryUsage: process.memoryUsage(),
-          activeConnections: 0 // You might track this differently
+          activeConnections: 0
         }
       }
     });
