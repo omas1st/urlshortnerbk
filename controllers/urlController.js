@@ -596,7 +596,7 @@ const getUrl = async (req, res) => {
 };
 
 /**
- * updateUrl
+ * updateUrl - FIXED: Now updates shortId when customName changes
  */
 const updateUrl = async (req, res) => {
   try {
@@ -606,8 +606,23 @@ const updateUrl = async (req, res) => {
     const url = await Url.findOne({ _id: id, user: req.user._id });
     if (!url) return res.status(404).json({ success: false, message: 'URL not found' });
 
-    if (updates.shortId && updates.shortId !== url.shortId) {
-      return res.status(400).json({ success: false, message: 'Cannot change short ID' });
+    // FIXED: Handle customName change - update shortId if customName changed
+    if (updates.customName && updates.customName !== url.customName) {
+      // Check if new customName is already in use as shortId
+      const existingUrl = await Url.findOne({ 
+        shortId: updates.customName,
+        _id: { $ne: url._id } // Exclude current URL
+      });
+      
+      if (existingUrl) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Custom name already in use as a short URL. Please choose a different name.' 
+        });
+      }
+      
+      // Update shortId to match new customName
+      updates.shortId = updates.customName;
     }
 
     // Validate URL if destinationUrl is being updated
@@ -645,13 +660,19 @@ const updateUrl = async (req, res) => {
     }
 
     if (updates.customName !== undefined && updates.customName !== url.customName) {
-      changes.push('settings_updated');
-      changeDetails.customNameChanged = true;
+      changes.push('alias_updated');
+      changeDetails.oldAlias = url.customName;
+      changeDetails.newAlias = updates.customName;
+      changeDetails.shortIdUpdated = true;
     }
 
-    if (updates.password !== undefined) {
+    if (updates.password !== undefined && updates.password !== '') {
       changes.push('password_changed');
       changeDetails.passwordChanged = true;
+    } else if (updates.password === '') {
+      // If empty password, set to null to remove password protection
+      updates.password = null;
+      changes.push('password_removed');
     }
 
     if (updates.expirationDate !== undefined) {
@@ -662,7 +683,7 @@ const updateUrl = async (req, res) => {
     // Handle QR code generation if generateQrCode is being enabled
     if (updates.generateQrCode !== undefined && updates.generateQrCode && !url.qrCodeData) {
       try {
-        const qrCodeUrl = `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`;
+        const qrCodeUrl = `${process.env.BASE_URL || 'http://localhost:5000'}/s/${updates.shortId || url.shortId}`;
         const qrCodeData = await QRCode.toDataURL(qrCodeUrl, {
           errorCorrectionLevel: 'H',
           margin: 2,
@@ -675,8 +696,9 @@ const updateUrl = async (req, res) => {
       }
     }
 
+    // Update all fields except _id
     Object.keys(updates).forEach(k => {
-      if (k !== 'shortId' && k !== '_id') url[k] = updates[k];
+      if (k !== '_id') url[k] = updates[k];
     });
 
     await url.save();
@@ -695,7 +717,7 @@ const updateUrl = async (req, res) => {
       url: {
         id: url._id,
         shortId: url.shortId,
-        shortUrl: url.shortUrl,
+        shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`,
         destinationUrl: url.destinationUrl,
         customName: url.customName,
         isActive: url.isActive,
@@ -703,6 +725,9 @@ const updateUrl = async (req, res) => {
         generateQrCode: url.generateQrCode,
         qrCodeData: url.qrCodeData,
         hasQrCode: !!url.qrCodeData,
+        splashImage: url.splashImage,
+        destinations: url.destinations,
+        enableAffiliateTracking: url.enableAffiliateTracking,
         updatedAt: url.updatedAt
       }
     });
