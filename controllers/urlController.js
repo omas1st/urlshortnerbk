@@ -1512,6 +1512,50 @@ const exportUrlAnalytics = async (req, res) => {
   }
 };
 
+/**
+ * getUserQRCodes - Get all user URLs with QR codes
+ */
+const getUserQRCodes = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    
+    // Find all URLs for the user that have QR codes
+    const urls = await Url.find({ 
+      user: userId,
+      $or: [
+        { qrCodeData: { $ne: null } },
+        { generateQrCode: true }
+      ]
+    })
+    .sort({ createdAt: -1 })
+    .lean();
+    
+    // Format the response
+    const formatted = urls.map(u => ({
+      id: u._id,
+      _id: u._id,
+      shortId: u.shortId,
+      shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${u.shortId}`,
+      destinationUrl: u.destinationUrl,
+      customName: u.customName || '',
+      clicks: u.clicks || 0,
+      createdAt: u.createdAt,
+      qrCodeData: u.qrCodeData || null,
+      generateQrCode: u.generateQrCode || false,
+      hasQrCode: !!u.qrCodeData
+    }));
+    
+    return res.json({
+      success: true,
+      data: formatted,
+      count: formatted.length
+    });
+  } catch (error) {
+    console.error('Get user QR codes error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to get QR codes' });
+  }
+};
+
 
 module.exports = {
   shortenUrl,
@@ -1532,5 +1576,6 @@ module.exports = {
   uploadImage,
   getDashboardStats,
   getRecentUrls,
+  getUserQRCodes,
   bulkOperations
 };

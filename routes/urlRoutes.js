@@ -48,4 +48,7 @@ router.get('/:shortId/qr', controller.getQRCode);
 // Public URL info
 router.get('/public/:shortId', controller.getUrlByShortId);
 
+// QR Codes endpoints
+router.get('/qr-codes', auth, controller.getUserQRCodes); // Add this line
+
 module.exports = router;
