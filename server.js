@@ -1,4 +1,4 @@
-// server.js - UPDATED: normalize redirect destination to ensure proper protocol
+// server.js - FIXED: Redirect to original URL when no matching rule found
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -63,27 +63,76 @@ app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// small helper to ensure destination is an absolute http(s) URL
+// FIXED: Better URL normalization function
 function normalizeUrl(dest) {
   if (!dest || typeof dest !== 'string') return null;
 
-  const trimmed = dest.trim();
+  let urlStr = dest.trim();
+  if (!urlStr) return null;
 
-  // If it already has a scheme (http, https, ftp, etc), return as-is but only allow http/https
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
-    // allow only http/https for redirects
-    if (/^https?:\/\//i.test(trimmed)) return trimmed;
-    // refuse other schemes (mailto:, javascript:, data:, etc.)
+  // Remove any surrounding quotes or brackets
+  urlStr = urlStr.replace(/^["'()\[\]{}<>]+|["'()\[\]{}<>]+$/g, '');
+
+  // Check if it's a valid URL format
+  try {
+    // If it already has a scheme
+    if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//.test(urlStr)) {
+      const urlObj = new URL(urlStr);
+      // Only allow http and https for redirects
+      if (urlObj.protocol === 'http:' || urlObj.protocol === 'https:') {
+        return urlStr;
+      }
+      return null; // Reject other protocols
+    }
+    
+    // If scheme-relative URL (//example.com)
+    if (urlStr.startsWith('//')) {
+      const urlObj = new URL('https:' + urlStr);
+      return urlObj.toString();
+    }
+    
+    // If no scheme, try to add https://
+    // Check if it looks like a domain
+    if (/^[a-zA-Z0-9][a-zA-Z0-9-]*(\.[a-zA-Z0-9-]+)+(\/[^\s]*)?$/.test(urlStr) || 
+        /^localhost(\:[0-9]+)?(\/[^\s]*)?$/.test(urlStr)) {
+      
+      // Add https:// if not present
+      if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
+        urlStr = 'https://' + urlStr;
+      }
+      
+      try {
+        const urlObj = new URL(urlStr);
+        return urlObj.toString();
+      } catch (e) {
+        // Try with http:// if https:// fails
+        if (urlStr.startsWith('https://')) {
+          try {
+            const httpUrl = urlStr.replace('https://', 'http://');
+            const urlObj = new URL(httpUrl);
+            return urlObj.toString();
+          } catch (httpErr) {
+            console.warn('Failed to parse URL even with http://:', urlStr, httpErr.message);
+            return null;
+          }
+        }
+        return null;
+      }
+    }
+    
+    // Try to parse as URL anyway (might be IP address or localhost)
+    try {
+      const urlObj = new URL('https://' + urlStr);
+      return urlObj.toString();
+    } catch (finalErr) {
+      console.warn('Failed to parse URL after all attempts:', urlStr, finalErr.message);
+      return null;
+    }
+    
+  } catch (error) {
+    console.warn('URL normalization error for:', urlStr, error.message);
     return null;
   }
-
-  // If scheme-relative (//example.com), add https:
-  if (trimmed.startsWith('//')) {
-    return 'https:' + trimmed;
-  }
-
-  // Otherwise assume missing protocol and prepend https://
-  return 'https://' + trimmed;
 }
 
 // Security middleware - FIXED VERSION
@@ -334,7 +383,76 @@ function weightedPickDestination(items) {
   return items[items.length - 1];
 }
 
-// SHORT URL REDIRECT ENDPOINT - FIXED & NORMALIZED VERSION
+// Helper: parse rule value and get current visitor's value for matching
+function getVisitorValueForRule(ruleType, userAgent, ip, uaParser) {
+  switch(ruleType) {
+    case 'country':
+      return getCountryFromIP(ip).toLowerCase();
+    case 'device':
+      return detectDeviceType(userAgent).toLowerCase();
+    case 'browser':
+      return (uaParser.browser.name || '').toLowerCase();
+    case 'time': {
+      const hour = new Date().getHours();
+      return hour.toString(); // Return as string for easier comparison
+    }
+    case 'os':
+      return (uaParser.os.name || '').toLowerCase();
+    case 'referrer':
+      // This would need to be passed from the request
+      return '';
+    case 'language':
+      // This would need to be passed from the request headers
+      return '';
+    default:
+      return '';
+  }
+}
+
+// Helper: check if visitor matches a rule
+function visitorMatchesRule(ruleType, ruleValue, userAgent, ip, uaParser) {
+  const visitorValue = getVisitorValueForRule(ruleType, userAgent, ip, uaParser);
+  
+  if (!visitorValue || !ruleValue) return false;
+  
+  switch(ruleType) {
+    case 'time': {
+      // Handle time range format like "09-17"
+      const [startStr, endStr] = ruleValue.split('-').map(s => s.trim());
+      const currentHour = new Date().getHours();
+      const startHour = parseInt(startStr, 10);
+      const endHour = parseInt(endStr, 10);
+      
+      if (isNaN(startHour) || isNaN(endHour)) return false;
+      
+      if (startHour <= endHour) {
+        // Normal range (e.g., 09-17)
+        return currentHour >= startHour && currentHour <= endHour;
+      } else {
+        // Overnight range (e.g., 22-06)
+        return currentHour >= startHour || currentHour <= endHour;
+      }
+    }
+    case 'browser':
+    case 'os':
+    case 'device':
+      // Exact match for browser, OS, device
+      return visitorValue === ruleValue.toLowerCase();
+    case 'country':
+      // Country code match
+      return visitorValue === ruleValue.toLowerCase();
+    case 'referrer':
+      // Referrer domain match (simplified)
+      return visitorValue.includes(ruleValue.toLowerCase());
+    case 'language':
+      // Language code match
+      return visitorValue.startsWith(ruleValue.toLowerCase());
+    default:
+      return false;
+  }
+}
+
+// SHORT URL REDIRECT ENDPOINT - FIXED VERSION: Multiple destinations work independently of smartDynamicLinks flag
 app.get('/s/:shortId', async (req, res) => {
   try {
     const { shortId } = req.params;
@@ -434,7 +552,7 @@ app.get('/s/:shortId', async (req, res) => {
                   margin-bottom: 20px;
                 }
                 .password-input {
-                  width: 100%;
+                  width: '100%';
                   padding: 16px 20px;
                   border: 2px solid #e1e5e9;
                   border-radius: 12px;
@@ -456,7 +574,7 @@ app.get('/s/:shortId', async (req, res) => {
                   font-weight: 600;
                   cursor: pointer;
                   transition: transform 0.2s, box-shadow 0.2s;
-                  width: 100%;
+                  width: '100%';
                 }
                 .submit-btn:hover {
                   transform: translateY(-2px);
@@ -566,86 +684,142 @@ app.get('/s/:shortId', async (req, res) => {
     // ---------- Compute final destination first (so splash meta-refresh uses correct URL) ----------
     let finalDestination = url.destinationUrl;
 
-    if (url.smartDynamicLinks && url.destinations && url.destinations.length > 0) {
+    // FIXED: Check if destinations exist and have content, regardless of smartDynamicLinks flag
+    if (url.destinations && Array.isArray(url.destinations) && url.destinations.length > 0) {
       const userAgent = req.headers['user-agent'] || '';
-      const now = new Date();
-      const hour = now.getHours();
-      const ua = UA(userAgent);
-      const deviceType = detectDeviceType(userAgent);
       const ip = req.ip || req.headers['x-forwarded-for'] || (req.connection && req.connection.remoteAddress) || 'Unknown';
-      const country = getCountryFromIP(ip);
+      const uaParser = UA(userAgent);
       
-      // Collect all matching destinations
-      const matches = [];
-      for (const dest of url.destinations) {
-        if (!dest || !dest.rule || !dest.url) continue;
-        
-        const [typeRaw, ...rest] = String(dest.rule).split(':');
-        const type = (typeRaw || '').toLowerCase();
-        const value = rest.join(':').trim(); // supports extra colons inside rule value
-        
-        if (!type || !value) continue;
-        
-        let match = false;
-        switch(type) {
-          case 'country':
-            match = (country || '').toLowerCase() === value.toLowerCase();
-            break;
-          case 'device':
-            match = deviceType.toLowerCase() === value.toLowerCase();
-            break;
-          case 'browser':
-            match = (ua.browser.name || '').toLowerCase() === value.toLowerCase();
-            break;
-          case 'time': {
-            const [startStr, endStr] = value.split('-').map(s => s.trim());
-            const startHour = parseInt(startStr, 10);
-            const endHour = parseInt(endStr, 10);
-            if (!isNaN(startHour) && !isNaN(endHour)) {
-              if (startHour <= endHour) {
-                match = hour >= startHour && hour < endHour;
-              } else {
-                // overnight
-                match = hour >= startHour || hour < endHour;
-              }
-            }
-            break;
-          }
-          case 'os':
-            match = (ua.os.name || '').toLowerCase() === value.toLowerCase();
-            break;
-          default:
-            match = false;
+      console.log(`\n=== Multiple destinations check for ${shortId} ===`);
+      console.log(`Total destinations in DB: ${url.destinations.length}`);
+      
+      // Log all destinations for debugging
+      url.destinations.forEach((dest, index) => {
+        console.log(`Destination ${index + 1}:`, {
+          url: dest.url,
+          rule: dest.rule,
+          weight: dest.weight,
+          hasUrlProperty: !!dest.url,
+          urlType: typeof dest.url
+        });
+      });
+      
+      // Parse destinations to extract rule type and value
+      const parsedDestinations = url.destinations.map(dest => {
+        if (!dest || !dest.rule || !dest.url) {
+          console.log(`Skipping invalid destination:`, dest);
+          return null;
         }
         
-        if (match) matches.push(dest);
-      }
-
-      if (matches.length === 1) {
-        finalDestination = matches[0].url;
-      } else if (matches.length > 1) {
-        const chosen = weightedPickDestination(matches);
-        if (chosen && chosen.url) finalDestination = chosen.url;
+        const [ruleType, ...ruleValueParts] = dest.rule.split(':');
+        const ruleValue = ruleValueParts.join(':').trim();
+        
+        // Create new object with ALL original properties
+        const parsedDest = {
+          url: dest.url, // Explicitly preserve the URL
+          rule: dest.rule,
+          weight: dest.weight || 1,
+          _id: dest._id,
+          parsedRuleType: ruleType ? ruleType.toLowerCase() : '',
+          parsedRuleValue: ruleValue ? ruleValue.toLowerCase() : ''
+        };
+        
+        console.log(`Parsed destination ${dest.url}:`, {
+          originalUrl: dest.url,
+          parsedRuleType: parsedDest.parsedRuleType,
+          parsedRuleValue: parsedDest.parsedRuleValue
+        });
+        
+        return parsedDest;
+      }).filter(Boolean);
+      
+      console.log(`Valid parsed destinations: ${parsedDestinations.length}`);
+      
+      if (parsedDestinations.length > 0) {
+        // First, find destinations that match the visitor
+        const matchingDestinations = parsedDestinations.filter(dest => {
+          const matches = visitorMatchesRule(
+            dest.parsedRuleType, 
+            dest.parsedRuleValue, 
+            userAgent, 
+            ip, 
+            uaParser
+          );
+          
+          console.log(`Checking rule ${dest.parsedRuleType}:${dest.parsedRuleValue} for ${dest.url} -> ${matches}`);
+          return matches;
+        });
+        
+        console.log(`\nVisitor details:`);
+        console.log(`- User Agent: ${userAgent.substring(0, 100)}...`);
+        console.log(`- IP: ${ip}`);
+        console.log(`- Country: ${getCountryFromIP(ip)}`);
+        console.log(`- Device: ${detectDeviceType(userAgent)}`);
+        console.log(`- Browser: ${uaParser.browser.name || 'Unknown'}`);
+        console.log(`- OS: ${uaParser.os.name || 'Unknown'}`);
+        console.log(`- Current hour: ${new Date().getHours()}`);
+        
+        console.log(`\nMatching destinations found: ${matchingDestinations.length}`);
+        matchingDestinations.forEach((dest, index) => {
+          console.log(`Match ${index + 1}: ${dest.url} (rule: ${dest.parsedRuleType}:${dest.parsedRuleValue})`);
+        });
+        
+        if (matchingDestinations.length === 1) {
+          // Only one match, use it
+          const matchedDest = matchingDestinations[0];
+          console.log(`\nSelected: Single match`);
+          console.log(`- URL: ${matchedDest.url}`);
+          console.log(`- Rule: ${matchedDest.parsedRuleType}:${matchedDest.parsedRuleValue}`);
+          finalDestination = matchedDest.url;
+        } else if (matchingDestinations.length > 1) {
+          // Multiple matches, use weighted selection
+          const chosen = weightedPickDestination(matchingDestinations);
+          if (chosen && chosen.url) {
+            finalDestination = chosen.url;
+            console.log(`\nSelected: Weighted selection from ${matchingDestinations.length} matches`);
+            console.log(`- URL: ${chosen.url}`);
+            console.log(`- Rule: ${chosen.parsedRuleType}:${chosen.parsedRuleValue}`);
+          }
+        } else {
+          // FIXED: No matches found - use original destination URL
+          console.log(`\nNo matching destinations found. Using original URL: ${url.destinationUrl}`);
+          finalDestination = url.destinationUrl;
+        }
       } else {
-        // fallback: choose among all destinations by weight if none matched
-        const chosenFallback = weightedPickDestination(url.destinations);
-        if (chosenFallback && chosenFallback.url) finalDestination = chosenFallback.url;
+        console.log('No valid parsed destinations found. Using original URL.');
+        finalDestination = url.destinationUrl;
       }
+      
+      console.log(`\nFinal destination selected: ${finalDestination}`);
+    } else {
+      console.log(`No multiple destinations configured for ${shortId}. Using original URL.`);
     }
 
     // Ensure finalDestination is an absolute http(s) URL
+    console.log(`\nNormalizing URL: "${finalDestination}"`);
     let normalized = normalizeUrl(finalDestination);
+    
     if (!normalized) {
       console.error('Invalid or unsupported destination URL stored for shortId', shortId, '->', finalDestination);
-      return res.status(400).json({
-        success: false,
-        message: 'Destination URL is invalid or unsupported'
-      });
+      console.error('Type of finalDestination:', typeof finalDestination);
+      
+      // Try to get the original destination URL as fallback
+      const fallbackNormalized = normalizeUrl(url.destinationUrl);
+      if (fallbackNormalized) {
+        console.log(`Using fallback (original destination): ${fallbackNormalized}`);
+        normalized = fallbackNormalized;
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'Destination URL is invalid or unsupported. Please check the URL format.'
+        });
+      }
     }
 
     // Verify the normalized URL is parseable
     try {
       new URL(normalized);
+      console.log(`URL successfully parsed: ${normalized}`);
     } catch (err) {
       console.error('Normalized destination URL is not a valid URL:', normalized, err);
       return res.status(400).json({
@@ -717,7 +891,7 @@ app.get('/s/:shortId', async (req, res) => {
         // Record click data (best-effort, don't fail the splash)
         try {
           const userAgent = req.headers['user-agent'] || '';
-          const ua = UA(userAgent);
+          const uaParser = UA(userAgent);
           const ip = req.ip || req.headers['x-forwarded-for'] || (req.connection && req.connection.remoteAddress) || 'Unknown';
           
           const clickData = {
@@ -728,12 +902,12 @@ app.get('/s/:shortId', async (req, res) => {
             timestamp: new Date(),
             country: getCountryFromIP(ip),
             device: detectDeviceType(userAgent),
-            browser: ua.browser.name || 'Unknown',
-            browserVersion: ua.browser.version || 'Unknown',
-            os: ua.os.name || 'Unknown',
-            osVersion: ua.os.version || 'Unknown',
-            deviceModel: ua.device.model || 'Unknown',
-            deviceVendor: ua.device.vendor || 'Unknown'
+            browser: uaParser.browser.name || 'Unknown',
+            browserVersion: uaParser.browser.version || 'Unknown',
+            os: uaParser.os.name || 'Unknown',
+            osVersion: uaParser.os.version || 'Unknown',
+            deviceModel: uaParser.device.model || 'Unknown',
+            deviceVendor: uaParser.device.vendor || 'Unknown'
           };
           
           const click = new Click(clickData);
@@ -846,7 +1020,7 @@ app.get('/s/:shortId', async (req, res) => {
     // Record detailed click data
     try {
       const userAgent = req.headers['user-agent'] || '';
-      const ua = UA(userAgent);
+      const uaParser = UA(userAgent);
       const ip = req.ip || req.headers['x-forwarded-for'] || (req.connection && req.connection.remoteAddress) || 'Unknown';
       
       const clickData = {
@@ -857,12 +1031,12 @@ app.get('/s/:shortId', async (req, res) => {
         timestamp: new Date(),
         country: getCountryFromIP(ip),
         device: detectDeviceType(userAgent),
-        browser: ua.browser.name || 'Unknown',
-        browserVersion: ua.browser.version || 'Unknown',
-        os: ua.os.name || 'Unknown',
-        osVersion: ua.os.version || 'Unknown',
-        deviceModel: ua.device.model || 'Unknown',
-        deviceVendor: ua.device.vendor || 'Unknown'
+        browser: uaParser.browser.name || 'Unknown',
+        browserVersion: uaParser.browser.version || 'Unknown',
+        os: uaParser.os.name || 'Unknown',
+        osVersion: uaParser.os.version || 'Unknown',
+        deviceModel: uaParser.device.model || 'Unknown',
+        deviceVendor: uaParser.device.vendor || 'Unknown'
       };
       
       const click = new Click(clickData);
@@ -873,7 +1047,8 @@ app.get('/s/:shortId', async (req, res) => {
     }
     
     // Redirect to final destination (normalized)
-    console.log(`Redirecting shortId=${shortId} -> ${normalized}`);
+    console.log(`\n=== Final redirect ===`);
+    console.log(`Redirecting shortId=${shortId} -> ${normalized}\n`);
     return res.redirect(302, normalized);
     
   } catch (error) {
