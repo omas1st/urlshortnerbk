@@ -17,38 +17,76 @@ const toInt = (v, fallback = 0) => {
 };
 
 /**
- * Helper — validate and normalize URL
+ * Helper — validate and normalize URL (updated to accept ANY valid URL format)
  */
 const validateAndNormalizeUrl = (url) => {
   if (!url || typeof url !== 'string') return { valid: false, normalized: null };
   
   let normalized = url.trim();
   
-  // Add protocol if missing
-  if (!normalized.startsWith('http://') && !normalized.startsWith('https://')) {
-    normalized = 'https://' + normalized;
-  }
-  
-  // Validate URL
+  // Check if it's a valid URL format - support ANY protocol or no protocol
   try {
+    // First, try to parse as-is
     const urlObj = new URL(normalized);
-    // Ensure it has a valid protocol
-    if (urlObj.protocol !== 'http:' && urlObj.protocol !== 'https:') {
-      return { valid: false, normalized: null };
+    
+    // If no protocol and it starts with //, add https:
+    if (normalized.startsWith('//')) {
+      normalized = 'https:' + normalized;
+      const testObj = new URL(normalized);
+      return { valid: true, normalized };
     }
+    
+    // If it already has a protocol (http, https, ftp, mailto, tel, etc.), accept it
     return { valid: true, normalized };
   } catch (e) {
-    // Try with http if https fails
-    if (normalized.startsWith('https://')) {
-      const httpUrl = normalized.replace('https://', 'http://');
+    // Try adding https:// for URLs without protocol
+    try {
+      // Don't add protocol if it's a special protocol like mailto:, tel:, whatsapp:, etc.
+      const hasSpecialProtocol = /^[a-z]+:/i.test(normalized) && !normalized.startsWith('http');
+      if (hasSpecialProtocol) {
+        // For special protocols, validate differently
+        return { valid: true, normalized };
+      }
+      
+      // For URLs without any protocol, add https://
+      const withProtocol = 'https://' + normalized;
+      const urlObj = new URL(withProtocol);
+      
+      // Additional check for common domain patterns
+      if (urlObj.hostname && urlObj.hostname.includes('.')) {
+        return { valid: true, normalized: withProtocol };
+      }
+      
+      return { valid: false, normalized: null };
+    } catch (e2) {
+      // Try with http://
       try {
-        new URL(httpUrl);
-        return { valid: true, normalized: httpUrl };
-      } catch (e2) {
+        const withHttp = 'http://' + normalized;
+        const urlObj = new URL(withHttp);
+        if (urlObj.hostname && urlObj.hostname.includes('.')) {
+          return { valid: true, normalized: withHttp };
+        }
+        return { valid: false, normalized: null };
+      } catch (e3) {
+        // Check for common URL patterns without strict validation
+        const urlPattern = /^(?:[a-z]+:)?\/\/[^\s$.?#].[^\s]*$/i;
+        const domainPattern = /^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/;
+        const ipPattern = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
+        
+        // Check if it looks like a domain or IP
+        const testUrl = normalized.split('/')[0];
+        if (domainPattern.test(testUrl) || ipPattern.test(testUrl)) {
+          return { valid: true, normalized: 'https://' + normalized };
+        }
+        
+        // Check if it already has a protocol
+        if (/^[a-z]+:\/\//i.test(normalized)) {
+          return { valid: true, normalized };
+        }
+        
         return { valid: false, normalized: null };
       }
     }
-    return { valid: false, normalized: null };
   }
 };
 
@@ -76,7 +114,7 @@ const sanitizeDestinations = (destinations) => {
 
     if (!rawUrl || !rawRule) continue;
 
-    // Normalize destination URL
+    // Normalize destination URL using our flexible validator
     const { valid, normalized } = validateAndNormalizeUrl(rawUrl);
     if (!valid) continue;
 
@@ -148,7 +186,7 @@ const getDateRange = (range, customStartDate, customEndDate) => {
 };
 
 /**
- * shortenUrl
+ * shortenUrl - Updated with better URL validation and QR code handling
  */
 const shortenUrl = async (req, res) => {
   try {
@@ -180,10 +218,13 @@ const shortenUrl = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Destination URL is required' });
     }
 
-    // Validate and normalize URL
+    // Validate and normalize URL using our flexible validator
     const { valid, normalized } = validateAndNormalizeUrl(destinationUrl);
     if (!valid) {
-      return res.status(400).json({ success: false, message: 'Invalid URL format. Please enter a valid URL like "example.com" or "https://example.com"' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid URL format. Please enter a valid URL (e.g., example.com, https://example.com, mailto:user@example.com, tel:+1234567890)' 
+      });
     }
 
     // Generate shortId
@@ -257,18 +298,27 @@ const shortenUrl = async (req, res) => {
     const url = new Url(urlData);
     await url.save();
 
-    // Generate QR code if requested
-    if (generateQrCode && !url.qrCodeData) {
+    // Generate QR code if requested - Always generate immediately
+    let qrCodeData = null;
+    if (generateQrCode) {
       try {
         const qrCodeUrl = `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`;
-        url.qrCodeData = await QRCode.toDataURL(qrCodeUrl, {
+        qrCodeData = await QRCode.toDataURL(qrCodeUrl, {
           errorCorrectionLevel: 'H',
           margin: 2,
-          width: 300
+          width: 300,
+          color: {
+            dark: '#000000',  // QR code color
+            light: '#FFFFFF'  // Background color
+          }
         });
+        
+        // Save to database
+        url.qrCodeData = qrCodeData;
         await url.save();
       } catch (err) {
         console.warn('QR generation failed (non-fatal):', err.message);
+        // Still proceed even if QR generation fails
       }
     }
 
@@ -303,22 +353,39 @@ const shortenUrl = async (req, res) => {
       console.warn('update user stats failed (non-fatal):', err.message);
     }
 
+    // Build the complete response with QR code data
+    const responseData = {
+      id: url._id,
+      _id: url._id,
+      shortId: url.shortId,
+      shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`,
+      destinationUrl: url.destinationUrl,
+      customName: url.customName,
+      password: !!url.password,
+      expirationDate: url.expirationDate,
+      isActive: url.isActive,
+      clicks: url.clicks,
+      createdAt: url.createdAt,
+      // Include all advanced settings
+      generateQrCode: url.generateQrCode,
+      qrCodeData: qrCodeData, // This will be null if not generated
+      hasQrCode: !!qrCodeData,
+      splashImage: url.splashImage,
+      // Include other settings that might be useful for the frontend
+      advancedSettings: {
+        generateQrCode: url.generateQrCode,
+        splashImage: url.splashImage,
+        password: !!url.password,
+        expirationDate: url.expirationDate,
+        destinations: url.destinations,
+        enableAffiliateTracking: url.enableAffiliateTracking
+      }
+    };
+
     return res.status(201).json({
       success: true,
       message: 'URL shortened successfully!',
-      url: {
-        id: url._id,
-        shortId: url.shortId,
-        shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`,
-        destinationUrl: url.destinationUrl,
-        customName: url.customName,
-        password: !!url.password,
-        expirationDate: url.expirationDate,
-        isActive: url.isActive,
-        clicks: url.clicks,
-        qrCodeUrl: url.qrCodeData,
-        createdAt: url.createdAt
-      }
+      url: responseData
     });
   } catch (error) {
     console.error('Shorten URL error:', error && error.message ? error.message : error);
@@ -340,7 +407,7 @@ const smartGenerate = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Destination URL is required' });
     }
 
-    // Validate URL first
+    // Validate URL first using our flexible validator
     const { valid, normalized } = validateAndNormalizeUrl(destinationUrl);
     if (!valid) {
       return res.status(400).json({ success: false, message: 'Invalid URL format' });
@@ -441,7 +508,9 @@ const getUserUrls = async (req, res) => {
       lastClicked: u.lastClicked,
       createdAt: u.createdAt,
       tags: u.tags || [],
-      hasQrCode: !!u.qrCodeData
+      hasQrCode: !!u.qrCodeData,
+      qrCodeData: u.qrCodeData || null,
+      generateQrCode: u.generateQrCode || false
     }));
 
     return res.json({
@@ -590,6 +659,22 @@ const updateUrl = async (req, res) => {
       changeDetails.expirationChanged = true;
     }
 
+    // Handle QR code generation if generateQrCode is being enabled
+    if (updates.generateQrCode !== undefined && updates.generateQrCode && !url.qrCodeData) {
+      try {
+        const qrCodeUrl = `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`;
+        const qrCodeData = await QRCode.toDataURL(qrCodeUrl, {
+          errorCorrectionLevel: 'H',
+          margin: 2,
+          width: 300
+        });
+        updates.qrCodeData = qrCodeData;
+        changes.push('qr_code_generated');
+      } catch (err) {
+        console.warn('QR generation failed during update:', err.message);
+      }
+    }
+
     Object.keys(updates).forEach(k => {
       if (k !== 'shortId' && k !== '_id') url[k] = updates[k];
     });
@@ -615,6 +700,9 @@ const updateUrl = async (req, res) => {
         customName: url.customName,
         isActive: url.isActive,
         clicks: url.clicks,
+        generateQrCode: url.generateQrCode,
+        qrCodeData: url.qrCodeData,
+        hasQrCode: !!url.qrCodeData,
         updatedAt: url.updatedAt
       }
     });
@@ -1054,12 +1142,25 @@ const getQRCode = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
+    // Generate QR code if not exists
     if (!url.qrCodeData) {
-      const qr = await QRCode.toDataURL(url.shortUrl, { errorCorrectionLevel: 'H', margin: 2, width: 300 });
-      url.qrCodeData = qr;
-      await url.save();
+      try {
+        const qrCodeUrl = `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`;
+        const qrCodeData = await QRCode.toDataURL(qrCodeUrl, {
+          errorCorrectionLevel: 'H',
+          margin: 2,
+          width: 300
+        });
+        
+        url.qrCodeData = qrCodeData;
+        await url.save();
+      } catch (err) {
+        console.error('QR code generation error:', err);
+        return res.status(500).json({ success: false, message: 'Failed to generate QR code' });
+      }
     }
 
+    // Return as base64 image
     const base64 = url.qrCodeData.replace(/^data:image\/[^;]+;base64,/, '');
     const img = Buffer.from(base64, 'base64');
     res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': img.length });
@@ -1194,7 +1295,7 @@ const getRecentUrls = async (req, res) => {
     const recent = await Url.find({ user: userId })
       .sort({ createdAt: -1 })
       .limit(5)
-      .select('shortId destinationUrl clicks createdAt')
+      .select('shortId destinationUrl clicks createdAt qrCodeData generateQrCode')
       .lean();
 
     // Map to the shape the frontend expects in the Dashboard component
@@ -1204,7 +1305,10 @@ const getRecentUrls = async (req, res) => {
       shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${u.shortId}`,
       destinationUrl: u.destinationUrl,
       clicks: u.clicks || 0,
-      createdAt: u.createdAt
+      createdAt: u.createdAt,
+      qrCodeData: u.qrCodeData || null,
+      generateQrCode: u.generateQrCode || false,
+      hasQrCode: !!u.qrCodeData
     }));
 
     return res.json({
@@ -1334,6 +1438,9 @@ const getUrlByShortId = async (req, res) => {
         expirationDate: url.expirationDate,
         isActive: url.isActive,
         clicks: url.clicks,
+        generateQrCode: url.generateQrCode,
+        qrCodeData: url.qrCodeData,
+        hasQrCode: !!url.qrCodeData,
         createdAt: url.createdAt
       }
     });
