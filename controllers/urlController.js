@@ -766,7 +766,7 @@ const deleteUrl = async (req, res) => {
 };
 
 /**
- * getUrlAnalytics - Enhanced version for all time ranges
+ * getUrlAnalytics - FIXED version
  */
 const getUrlAnalytics = async (req, res) => {
   try {
@@ -794,7 +794,7 @@ const getUrlAnalytics = async (req, res) => {
       },
       {
         $facet: {
-          // Basic stats
+          // Basic stats - FIXED: Proper aggregation
           basicStats: [
             {
               $group: {
@@ -803,15 +803,351 @@ const getUrlAnalytics = async (req, res) => {
                 uniqueClicks: { $addToSet: '$ipAddress' },
                 returningVisitors: { $sum: { $cond: ['$isReturning', 1, 0] } },
                 conversions: { $sum: { $cond: ['$isConversion', 1, 0] } },
-                totalTimeOnPage: { $sum: '$timeOnPage' },
-                totalScrollDepth: { $sum: '$scrollDepth' },
-                clicksWithTimeToClick: { $sum: { $cond: ['$timeToClick', 1, 0] } },
-                totalTimeToClick: { $sum: '$timeToClick' }
+                totalTimeOnPage: { $sum: { $cond: [{ $gt: ['$timeOnPage', 0] }, '$timeOnPage', 0] } },
+                totalScrollDepth: { $sum: { $cond: [{ $gt: ['$scrollDepth', 0] }, '$scrollDepth', 0] } },
+                clicksWithTimeToClick: { $sum: { $cond: [{ $gt: ['$timeToClick', 0] }, 1, 0] } },
+                totalTimeToClick: { $sum: { $cond: [{ $gt: ['$timeToClick', 0] }, '$timeToClick', 0] } },
+                clicksWithSessionData: { $sum: { $cond: [{ $gt: ['$timeOnPage', 0] }, 1, 0] } }
               }
             }
           ],
           
           // Time series - adjust grouping for all time
+          timeSeries: [
+            {
+              $group: {
+                _id: {
+                  $dateToString: { 
+                    format: range === 'all' ? '%Y-%m' : '%Y-%m-%d', 
+                    date: '$timestamp' 
+                  }
+                },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { _id: 1 } }
+          ],
+          
+          // Countries
+          countries: [
+            {
+              $match: {
+                country: { $exists: true, $ne: null, $ne: '' }
+              }
+            },
+            {
+              $group: {
+                _id: '$country',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+          ],
+          
+          // Devices - FIXED: Proper device aggregation
+          devices: [
+            {
+              $group: {
+                _id: null,
+                desktop: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /desktop/i } },
+                      1,
+                      0
+                    ]
+                  }
+                },
+                mobile: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /mobile/i } },
+                      1,
+                      0
+                    ]
+                  }
+                },
+                tablet: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /tablet/i } },
+                      1,
+                      0
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          
+          // Recent clicks
+          recentClicks: [
+            { $sort: { timestamp: -1 } },
+            { $limit: 10 }
+          ],
+          
+          // Peak hour - FIXED: Proper hour aggregation
+          peakHour: [
+            {
+              $group: {
+                _id: { $hour: '$timestamp' },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 1 }
+          ],
+          
+          // Referrers - FIXED: Proper referrer handling
+          referrers: [
+            {
+              $match: {
+                referrerDomain: { $exists: true, $ne: null, $ne: 'invalid' }
+              }
+            },
+            {
+              $group: {
+                _id: '$referrerDomain',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 5 }
+          ],
+          
+          // Session data for pages/session calculation
+          sessionData: [
+            {
+              $match: {
+                timeOnPage: { $gt: 0 }
+              }
+            },
+            {
+              $group: {
+                _id: '$sessionId',
+                totalClicks: { $sum: 1 },
+                avgTimeOnPage: { $avg: '$timeOnPage' }
+              }
+            }
+          ]
+        }
+      }
+    ]);
+
+    const stats = analytics[0];
+    const basicStats = stats.basicStats[0] || { 
+      totalClicks: 0, 
+      uniqueClicks: [], 
+      returningVisitors: 0,
+      conversions: 0,
+      totalTimeOnPage: 0,
+      totalScrollDepth: 0,
+      clicksWithTimeToClick: 0,
+      totalTimeToClick: 0,
+      clicksWithSessionData: 0
+    };
+    
+    const totalClicks = basicStats.totalClicks || 0;
+    const uniqueClicks = basicStats.uniqueClicks ? basicStats.uniqueClicks.length : 0;
+    const returningVisitors = basicStats.returningVisitors || 0;
+    const conversions = basicStats.conversions || 0;
+    
+    // Calculate metrics - FIXED: Proper calculations
+    const conversionRate = totalClicks > 0 ? ((conversions / totalClicks) * 100).toFixed(1) : 0;
+    const avgTimeOnPage = basicStats.clicksWithSessionData > 0 
+      ? Math.floor(basicStats.totalTimeOnPage / basicStats.clicksWithSessionData)
+      : 0;
+      
+    const avgScrollDepth = basicStats.clicksWithSessionData > 0
+      ? Math.round((basicStats.totalScrollDepth / basicStats.clicksWithSessionData))
+      : 0;
+      
+    const avgTimeToClick = basicStats.clicksWithTimeToClick > 0
+      ? Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)
+      : 0;
+    
+    // Time series
+    const timeSeriesData = stats.timeSeries || [];
+    const clicksOverTime = {
+      labels: timeSeriesData.map(item => {
+        const dateStr = item._id;
+        if (range === 'all' && /^\d{4}-\d{2}$/.test(dateStr)) {
+          const [year, month] = dateStr.split('-');
+          const date = new Date(year, month - 1);
+          return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+        } else {
+          try {
+            const date = new Date(dateStr);
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          } catch {
+            return dateStr;
+          }
+        }
+      }),
+      values: timeSeriesData.map(item => item.count)
+    };
+    
+    // Countries
+    const countryData = stats.countries || [];
+    const topCountries = {
+      rawData: countryData.map(item => ({
+        country: item._id,
+        visits: item.count
+      })),
+      countries: countryData.map(item => item._id),
+      visits: countryData.map(item => item.count)
+    };
+    
+    // Devices - FIXED: Return proper object format
+    const deviceData = stats.devices[0] || { desktop: 0, mobile: 0, tablet: 0 };
+    const deviceDistribution = {
+      desktop: deviceData.desktop || 0,
+      mobile: deviceData.mobile || 0,
+      tablet: deviceData.tablet || 0
+    };
+    
+    // Calculate engagement metrics
+    const engagedClicks = await Click.countDocuments({
+      urlId: url._id,
+      timestamp: { $gte: startDate, $lte: endDate },
+      isBot: false,
+      timeOnPage: { $gt: 30 } // Consider engaged if spent more than 30 seconds
+    });
+    
+    const bounceRate = totalClicks > 0 ? Math.round(((totalClicks - engagedClicks) / totalClicks) * 100) : 0;
+    const engagement = {
+      bounced: Math.round(totalClicks * (bounceRate / 100)),
+      engaged: engagedClicks,
+      bounceRate: bounceRate
+    };
+    
+    // Peak hour
+    const peakHourData = stats.peakHour[0];
+    const peakHour = peakHourData ? `${peakHourData._id}:00` : 'N/A';
+    
+    // Top referrer
+    const topReferrerData = stats.referrers[0];
+    const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
+    
+    // Recent clicks
+    const recentClicks = stats.recentClicks || [];
+    
+    // Calculate pages per session
+    const sessionData = stats.sessionData || [];
+    const totalSessions = sessionData.length;
+    const totalPagesViewed = sessionData.reduce((sum, session) => sum + session.totalClicks, 0);
+    const pagesPerSession = totalSessions > 0 ? (totalPagesViewed / totalSessions).toFixed(1) : 1.0;
+    
+    return res.json({
+      success: true,
+      analytics: {
+        totalClicks,
+        uniqueClicks,
+        returningVisitors,
+        conversionRate: `${conversionRate}%`,
+        clicksOverTime,
+        topCountries,
+        deviceDistribution, // Now returns proper object format
+        engagement,
+        recentClicks: recentClicks.map(click => ({
+          timestamp: click.timestamp,
+          ipAddress: click.ipAddress ? click.ipAddress.substring(0, 8) + '...' : 'N/A',
+          country: click.country || 'Unknown',
+          device: click.device || 'Unknown',
+          browser: click.browser || 'Unknown',
+          referrer: click.referrer || 'Direct'
+        })),
+        detailedMetrics: {
+          avgTimeToClick: avgTimeToClick > 0 ? `${avgTimeToClick}s` : 'N/A',
+          avgScrollDepth: avgScrollDepth > 0 ? `${avgScrollDepth}%` : 'N/A',
+          avgSessionDuration: avgTimeOnPage > 0 ? `${avgTimeOnPage}s` : 'N/A',
+          peakHour,
+          topReferrer,
+          pagesPerSession: parseFloat(pagesPerSession),
+          conversionRate: `${conversionRate}%`
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('Get URL analytics error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to get analytics' });
+  }
+};
+
+/**
+ * getOverallAnalytics - Aggregates data across all user URLs
+ */
+const getOverallAnalytics = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { range = '7days', startDate: customStartDate, endDate: customEndDate } = req.query;
+    
+    console.log(`Getting overall analytics for user ${userId}, range: ${range}`);
+    
+    // Calculate date range
+    const { startDate, endDate } = getDateRange(range, customStartDate, customEndDate);
+    
+    // Get all user URLs
+    const userUrls = await Url.find({ user: userId }).select('_id shortId destinationUrl').lean();
+    const urlIds = userUrls.map(url => url._id);
+    
+    if (urlIds.length === 0) {
+      return res.json({
+        success: true,
+        analytics: {
+          totalClicks: 0,
+          uniqueVisitors: 0,
+          returningVisitors: 0,
+          conversionRate: '0%',
+          totalUrls: 0,
+          clicksOverTime: { labels: [], values: [] },
+          topCountries: { countries: [], visits: [] },
+          deviceDistribution: { desktop: 0, mobile: 0, tablet: 0 },
+          engagement: { bounced: 0, engaged: 0, bounceRate: 0 },
+          recentClicks: [],
+          detailedMetrics: {
+            avgTimeToClick: '0s',
+            avgScrollDepth: '0%',
+            peakHour: 'N/A',
+            topReferrer: 'Direct',
+            avgSessionDuration: '0:00',
+            pagesPerSession: 0
+          }
+        }
+      });
+    }
+    
+    // Aggregate clicks across all user URLs
+    const clickStats = await Click.aggregate([
+      {
+        $match: {
+          urlId: { $in: urlIds },
+          timestamp: { $gte: startDate, $lte: endDate },
+          isBot: false
+        }
+      },
+      {
+        $facet: {
+          // Basic stats
+          basicStats: [
+            {
+              $group: {
+                _id: null,
+                totalClicks: { $sum: 1 },
+                uniqueIPs: { $addToSet: '$ipAddress' },
+                returningVisitors: { $sum: { $cond: ['$isReturning', 1, 0] } },
+                totalTimeOnPage: { $sum: '$timeOnPage' },
+                totalScrollDepth: { $sum: '$scrollDepth' },
+                clicksWithTimeToClick: { $sum: { $cond: ['$timeToClick', 1, 0] } },
+                totalTimeToClick: { $sum: '$timeToClick' },
+                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } }
+              }
+            }
+          ],
+          
+          // Time series
           timeSeries: [
             {
               $group: {
@@ -892,36 +1228,45 @@ const getUrlAnalytics = async (req, res) => {
       }
     ]);
 
-    const stats = analytics[0];
+    const stats = clickStats[0];
     const basicStats = stats.basicStats[0] || { 
       totalClicks: 0, 
-      uniqueClicks: [], 
-      returningVisitors: 0,
-      conversions: 0,
+      uniqueIPs: [], 
+      returningVisitors: 0, 
       totalTimeOnPage: 0,
       totalScrollDepth: 0,
       clicksWithTimeToClick: 0,
-      totalTimeToClick: 0
+      totalTimeToClick: 0,
+      conversions: 0
     };
     
     const totalClicks = basicStats.totalClicks || 0;
-    const uniqueClicks = basicStats.uniqueClicks ? basicStats.uniqueClicks.length : 0;
+    const uniqueVisitors = basicStats.uniqueIPs ? basicStats.uniqueIPs.length : 0;
     const returningVisitors = basicStats.returningVisitors || 0;
     const conversions = basicStats.conversions || 0;
     
     // Calculate metrics
-    const conversionRate = totalClicks > 0 ? ((conversions / totalClicks) * 100).toFixed(1) : 0;
     const avgTimeOnPage = basicStats.totalTimeOnPage && totalClicks > 0 
-      ? Math.floor(basicStats.totalTimeOnPage / totalClicks)
-      : 0;
+      ? `${Math.floor(basicStats.totalTimeOnPage / totalClicks)}s`
+      : '0s';
       
     const avgScrollDepth = basicStats.totalScrollDepth && totalClicks > 0
-      ? Math.round((basicStats.totalScrollDepth / totalClicks) * 100)
-      : 0;
+      ? `${Math.round((basicStats.totalScrollDepth / totalClicks) * 100)}%`
+      : '0%';
       
     const avgTimeToClick = basicStats.totalTimeToClick && basicStats.clicksWithTimeToClick > 0
-      ? Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)
-      : 0;
+      ? `${Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)}s`
+      : 'N/A';
+    
+    const conversionRate = totalClicks > 0 
+      ? `${((conversions / totalClicks) * 100).toFixed(1)}%`
+      : '0%';
+    
+    const peakHourData = stats.peakHour[0];
+    const peakHour = peakHourData ? `${peakHourData._id}:00` : 'N/A';
+    
+    const topReferrerData = stats.referrers[0];
+    const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
     
     // Time series
     const timeSeriesData = stats.timeSeries || [];
@@ -955,13 +1300,12 @@ const getUrlAnalytics = async (req, res) => {
       visits: countryData.map(item => item.count)
     };
     
-    // Devices - FIXED: Return proper object format expected by frontend
+    // Devices
     const deviceData = stats.devices || [];
     const deviceDistribution = {
       desktop: 0,
       mobile: 0,
-      tablet: 0,
-      other: 0
+      tablet: 0
     };
     
     deviceData.forEach(item => {
@@ -972,17 +1316,15 @@ const getUrlAnalytics = async (req, res) => {
         deviceDistribution.mobile = item.count;
       } else if (deviceType.includes('tablet')) {
         deviceDistribution.tablet = item.count;
-      } else {
-        deviceDistribution.other = item.count;
       }
     });
     
-    // Calculate engagement metrics
+    // Engagement
     const engagedClicks = await Click.countDocuments({
-      urlId: url._id,
+      urlId: { $in: urlIds },
       timestamp: { $gte: startDate, $lte: endDate },
       isBot: false,
-      timeOnPage: { $gt: 30 } // Consider engaged if spent more than 30 seconds
+      timeOnPage: { $gt: 30 }
     });
     
     const bounceRate = totalClicks > 0 ? Math.round(((totalClicks - engagedClicks) / totalClicks) * 100) : 0;
@@ -992,27 +1334,20 @@ const getUrlAnalytics = async (req, res) => {
       bounceRate: bounceRate
     };
     
-    // Peak hour
-    const peakHourData = stats.peakHour[0];
-    const peakHour = peakHourData ? `${peakHourData._id}:00` : 'N/A';
-    
-    // Top referrer
-    const topReferrerData = stats.referrers[0];
-    const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
-    
     // Recent clicks
     const recentClicks = stats.recentClicks || [];
     
-    return res.json({
+    res.json({
       success: true,
       analytics: {
         totalClicks,
-        uniqueClicks,
+        uniqueVisitors,
         returningVisitors,
-        conversionRate: `${conversionRate}%`,
+        conversionRate,
+        totalUrls: urlIds.length,
         clicksOverTime,
         topCountries,
-        deviceDistribution, // Now returns proper object format
+        deviceDistribution,
         engagement,
         recentClicks: recentClicks.map(click => ({
           timestamp: click.timestamp,
@@ -1020,23 +1355,27 @@ const getUrlAnalytics = async (req, res) => {
           country: click.country || 'Unknown',
           device: click.device || 'Unknown',
           browser: click.browser || 'Unknown',
-          referrer: click.referrer || 'Direct'
+          referrer: click.referrer || 'Direct',
+          referrerDomain: click.referrerDomain
         })),
         detailedMetrics: {
-          avgTimeToClick: avgTimeToClick > 0 ? `${avgTimeToClick}s` : 'N/A',
-          avgScrollDepth: avgScrollDepth > 0 ? `${avgScrollDepth}%` : 'N/A',
-          avgSessionDuration: avgTimeOnPage > 0 ? `${avgTimeOnPage}s` : 'N/A',
+          avgTimeToClick,
+          avgScrollDepth,
+          avgSessionDuration: avgTimeOnPage,
           peakHour,
           topReferrer,
           pagesPerSession: (engagedClicks > 0 ? (totalClicks / engagedClicks).toFixed(1) : 1.0),
-          conversionRate: `${conversionRate}%`
+          conversionRate
         }
       }
     });
     
   } catch (error) {
-    console.error('Get URL analytics error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to get analytics' });
+    console.error('Get overall analytics error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get overall analytics: ' + (error.message || 'Unknown error')
+    });
   }
 };
 
@@ -1582,6 +1921,7 @@ const getUserQRCodes = async (req, res) => {
 };
 
 
+
 module.exports = {
   shortenUrl,
   smartGenerate,
@@ -1590,6 +1930,7 @@ module.exports = {
   getUrlByShortId,
   exportUrlAnalytics,
   getUrlAnalytics,
+  getOverallAnalytics,
   getUrl,
   updateUrl,
   deleteUrl,

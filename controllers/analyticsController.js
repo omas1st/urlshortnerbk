@@ -79,7 +79,7 @@ const getOverallAnalytics = async (req, res) => {
           totalUrls: 0,
           topUrls: [],
           clicksOverTime: { labels: [], values: [] },
-          topCountries: { countries: [], visits: [] },
+          topCountries: { rawData: [], countries: [], visits: [] },
           deviceDistribution: { desktop: 0, mobile: 0, tablet: 0 },
           engagement: { bounced: 0, engaged: 0, bounceRate: 0 },
           recentClicks: [],
@@ -88,8 +88,8 @@ const getOverallAnalytics = async (req, res) => {
             avgScrollDepth: '0%',
             peakHour: 'N/A',
             topReferrer: 'Direct',
-            avgSessionDuration: '0:00',
-            pagesPerSession: 0
+            avgSessionDuration: '0s',
+            pagesPerSession: 1.0
           }
         }
       });
@@ -114,11 +114,12 @@ const getOverallAnalytics = async (req, res) => {
                 totalClicks: { $sum: 1 },
                 uniqueIPs: { $addToSet: '$ipAddress' },
                 returningVisitors: { $sum: { $cond: ['$isReturning', 1, 0] } },
-                totalTimeOnPage: { $sum: '$timeOnPage' },
-                totalScrollDepth: { $sum: '$scrollDepth' },
-                clicksWithTimeToClick: { $sum: { $cond: ['$timeToClick', 1, 0] } },
-                totalTimeToClick: { $sum: '$timeToClick' },
-                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } }
+                totalTimeOnPage: { $sum: { $cond: [{ $gt: ['$timeOnPage', 0] }, '$timeOnPage', 0] } },
+                totalScrollDepth: { $sum: { $cond: [{ $gt: ['$scrollDepth', 0] }, '$scrollDepth', 0] } },
+                clicksWithTimeToClick: { $sum: { $cond: [{ $gt: ['$timeToClick', 0] }, 1, 0] } },
+                totalTimeToClick: { $sum: { $cond: [{ $gt: ['$timeToClick', 0] }, '$timeToClick', 0] } },
+                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } },
+                clicksWithSessionData: { $sum: { $cond: [{ $gt: ['$timeOnPage', 0] }, 1, 0] } }
               }
             }
           ],
@@ -139,11 +140,11 @@ const getOverallAnalytics = async (req, res) => {
             { $sort: { _id: 1 } }
           ],
           
-          // Top countries
+          // Countries
           countries: [
             {
               $match: {
-                country: { $exists: true, $ne: null }
+                country: { $exists: true, $ne: null, $ne: '' }
               }
             },
             {
@@ -156,12 +157,38 @@ const getOverallAnalytics = async (req, res) => {
             { $limit: 10 }
           ],
           
-          // Device distribution
+          // Device distribution - FIXED: Proper aggregation for device types
           devices: [
             {
               $group: {
-                _id: '$device',
-                count: { $sum: 1 }
+                _id: null,
+                desktop: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /desktop/i } },
+                      1,
+                      0
+                    ]
+                  }
+                },
+                mobile: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /mobile/i } },
+                      1,
+                      0
+                    ]
+                  }
+                },
+                tablet: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /tablet/i } },
+                      1,
+                      0
+                    ]
+                  }
+                }
               }
             }
           ],
@@ -172,7 +199,7 @@ const getOverallAnalytics = async (req, res) => {
             { $limit: 10 }
           ],
           
-          // Peak hour
+          // Peak hour - FIXED: Proper hour aggregation
           peakHour: [
             {
               $group: {
@@ -184,11 +211,11 @@ const getOverallAnalytics = async (req, res) => {
             { $limit: 1 }
           ],
           
-          // Referrers
+          // Referrers - FIXED: Proper referrer domain handling
           referrers: [
             {
               $match: {
-                referrerDomain: { $exists: true, $ne: null }
+                referrerDomain: { $exists: true, $ne: null, $ne: 'invalid' }
               }
             },
             {
@@ -201,21 +228,20 @@ const getOverallAnalytics = async (req, res) => {
             { $limit: 5 }
           ],
           
-          // Browser stats
-          browsers: [
+          // Session data for pages/session calculation
+          sessionData: [
             {
               $match: {
-                browser: { $exists: true, $ne: null }
+                timeOnPage: { $gt: 0 }
               }
             },
             {
               $group: {
-                _id: '$browser',
-                count: { $sum: 1 }
+                _id: '$sessionId',
+                totalClicks: { $sum: 1 },
+                avgTimeOnPage: { $avg: '$timeOnPage' }
               }
-            },
-            { $sort: { count: -1 } },
-            { $limit: 5 }
+            }
           ]
         }
       }
@@ -230,7 +256,8 @@ const getOverallAnalytics = async (req, res) => {
       totalScrollDepth: 0,
       clicksWithTimeToClick: 0,
       totalTimeToClick: 0,
-      conversions: 0
+      conversions: 0,
+      clicksWithSessionData: 0
     };
     
     const totalClicks = basicStats.totalClicks || 0;
@@ -239,15 +266,15 @@ const getOverallAnalytics = async (req, res) => {
     const conversions = basicStats.conversions || 0;
     
     // Calculate detailed metrics based on actual data
-    const avgTimeOnPage = basicStats.totalTimeOnPage && totalClicks > 0 
-      ? `${Math.floor(basicStats.totalTimeOnPage / totalClicks)}s`
+    const avgTimeOnPage = basicStats.clicksWithSessionData > 0 
+      ? `${Math.round(basicStats.totalTimeOnPage / basicStats.clicksWithSessionData)}s`
       : '0s';
       
-    const avgScrollDepth = basicStats.totalScrollDepth && totalClicks > 0
-      ? `${Math.round((basicStats.totalScrollDepth / totalClicks) * 100)}%`
+    const avgScrollDepth = basicStats.clicksWithSessionData > 0
+      ? `${Math.round((basicStats.totalScrollDepth / basicStats.clicksWithSessionData))}%`
       : '0%';
       
-    const avgTimeToClick = basicStats.totalTimeToClick && basicStats.clicksWithTimeToClick > 0
+    const avgTimeToClick = basicStats.clicksWithTimeToClick > 0
       ? `${Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)}s`
       : 'N/A';
     
@@ -256,6 +283,12 @@ const getOverallAnalytics = async (req, res) => {
     
     const topReferrerData = stats.referrers[0];
     const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
+    
+    // Calculate pages per session from session data
+    const sessionData = stats.sessionData || [];
+    const totalSessions = sessionData.length;
+    const totalPagesViewed = sessionData.reduce((sum, session) => sum + session.totalClicks, 0);
+    const pagesPerSession = totalSessions > 0 ? (totalPagesViewed / totalSessions).toFixed(1) : 1.0;
     
     // Time series data with proper formatting
     const timeSeriesData = stats.timeSeries || [];
@@ -291,26 +324,15 @@ const getOverallAnalytics = async (req, res) => {
       visits: countryData.map(item => item.count)
     };
     
-    // Device data
-    const deviceData = stats.devices || [];
+    // Device data - FIXED: Proper device distribution
+    const deviceData = stats.devices[0] || { desktop: 0, mobile: 0, tablet: 0 };
     const deviceDistribution = {
-      desktop: 0,
-      mobile: 0,
-      tablet: 0
+      desktop: deviceData.desktop || 0,
+      mobile: deviceData.mobile || 0,
+      tablet: deviceData.tablet || 0
     };
     
-    deviceData.forEach(item => {
-      const deviceType = (item._id || '').toLowerCase();
-      if (deviceType.includes('desktop')) {
-        deviceDistribution.desktop = item.count;
-      } else if (deviceType.includes('mobile')) {
-        deviceDistribution.mobile = item.count;
-      } else if (deviceType.includes('tablet')) {
-        deviceDistribution.tablet = item.count;
-      }
-    });
-    
-    // Calculate actual bounce rate from engaged vs bounced
+    // Calculate actual engagement metrics
     const engagedClicks = await Click.countDocuments({
       urlId: { $in: urlIds },
       timestamp: { $gte: startDate, $lte: endDate },
@@ -328,13 +350,6 @@ const getOverallAnalytics = async (req, res) => {
     // Recent clicks
     const recentClicks = stats.recentClicks || [];
     
-    // Browser distribution
-    const browserData = stats.browsers || [];
-    const browserDistribution = browserData.map(browser => ({
-      browser: browser._id,
-      count: browser.count
-    }));
-    
     // Calculate actual conversion rate
     const conversionRate = totalClicks > 0 ? ((conversions / totalClicks) * 100).toFixed(1) : 0;
     
@@ -342,7 +357,7 @@ const getOverallAnalytics = async (req, res) => {
       success: true,
       analytics: {
         totalClicks,
-        uniqueVisitors: uniqueVisitors,
+        uniqueVisitors,
         returningVisitors,
         conversionRate: `${conversionRate}%`,
         totalUrls: urlIds.length,
@@ -371,7 +386,7 @@ const getOverallAnalytics = async (req, res) => {
           avgSessionDuration: avgTimeOnPage,
           peakHour,
           topReferrer,
-          pagesPerSession: (engagedClicks > 0 ? (totalClicks / engagedClicks).toFixed(1) : 1.0),
+          pagesPerSession: parseFloat(pagesPerSession),
           conversionRate: `${conversionRate}%`
         }
       }
@@ -430,11 +445,12 @@ const getUrlAnalytics = async (req, res) => {
                 totalClicks: { $sum: 1 },
                 uniqueIPs: { $addToSet: '$ipAddress' },
                 returningVisitors: { $sum: { $cond: ['$isReturning', 1, 0] } },
-                totalTimeOnPage: { $sum: '$timeOnPage' },
-                totalScrollDepth: { $sum: '$scrollDepth' },
-                clicksWithTimeToClick: { $sum: { $cond: ['$timeToClick', 1, 0] } },
-                totalTimeToClick: { $sum: '$timeToClick' },
-                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } }
+                totalTimeOnPage: { $sum: { $cond: [{ $gt: ['$timeOnPage', 0] }, '$timeOnPage', 0] } },
+                totalScrollDepth: { $sum: { $cond: [{ $gt: ['$scrollDepth', 0] }, '$scrollDepth', 0] } },
+                clicksWithTimeToClick: { $sum: { $cond: [{ $gt: ['$timeToClick', 0] }, 1, 0] } },
+                totalTimeToClick: { $sum: { $cond: [{ $gt: ['$timeToClick', 0] }, '$timeToClick', 0] } },
+                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } },
+                clicksWithSessionData: { $sum: { $cond: [{ $gt: ['$timeOnPage', 0] }, 1, 0] } }
               }
             }
           ],
@@ -459,7 +475,7 @@ const getUrlAnalytics = async (req, res) => {
           countries: [
             {
               $match: {
-                country: { $exists: true, $ne: null }
+                country: { $exists: true, $ne: null, $ne: '' }
               }
             },
             {
@@ -472,12 +488,38 @@ const getUrlAnalytics = async (req, res) => {
             { $limit: 10 }
           ],
           
-          // Devices
+          // Device distribution - FIXED: Proper aggregation for device types
           devices: [
             {
               $group: {
-                _id: '$device',
-                count: { $sum: 1 }
+                _id: null,
+                desktop: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /desktop/i } },
+                      1,
+                      0
+                    ]
+                  }
+                },
+                mobile: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /mobile/i } },
+                      1,
+                      0
+                    ]
+                  }
+                },
+                tablet: {
+                  $sum: {
+                    $cond: [
+                      { $regexMatch: { input: '$device', regex: /tablet/i } },
+                      1,
+                      0
+                    ]
+                  }
+                }
               }
             }
           ],
@@ -488,7 +530,7 @@ const getUrlAnalytics = async (req, res) => {
             { $limit: 10 }
           ],
           
-          // Peak hour
+          // Peak hour - FIXED: Proper hour aggregation
           peakHour: [
             {
               $group: {
@@ -500,11 +542,11 @@ const getUrlAnalytics = async (req, res) => {
             { $limit: 1 }
           ],
           
-          // Referrers
+          // Referrers - FIXED: Proper referrer domain handling
           referrers: [
             {
               $match: {
-                referrerDomain: { $exists: true, $ne: null }
+                referrerDomain: { $exists: true, $ne: null, $ne: 'invalid' }
               }
             },
             {
@@ -515,6 +557,22 @@ const getUrlAnalytics = async (req, res) => {
             },
             { $sort: { count: -1 } },
             { $limit: 5 }
+          ],
+          
+          // Session data for pages/session calculation
+          sessionData: [
+            {
+              $match: {
+                timeOnPage: { $gt: 0 }
+              }
+            },
+            {
+              $group: {
+                _id: '$sessionId',
+                totalClicks: { $sum: 1 },
+                avgTimeOnPage: { $avg: '$timeOnPage' }
+              }
+            }
           ]
         }
       }
@@ -529,7 +587,8 @@ const getUrlAnalytics = async (req, res) => {
       totalScrollDepth: 0,
       clicksWithTimeToClick: 0,
       totalTimeToClick: 0,
-      conversions: 0
+      conversions: 0,
+      clicksWithSessionData: 0
     };
     
     const totalClicks = basicStats.totalClicks || 0;
@@ -538,15 +597,15 @@ const getUrlAnalytics = async (req, res) => {
     const conversions = basicStats.conversions || 0;
     
     // Calculate metrics based on actual data
-    const avgTimeOnPage = basicStats.totalTimeOnPage && totalClicks > 0 
-      ? `${Math.floor(basicStats.totalTimeOnPage / totalClicks)}s`
+    const avgTimeOnPage = basicStats.clicksWithSessionData > 0 
+      ? `${Math.round(basicStats.totalTimeOnPage / basicStats.clicksWithSessionData)}s`
       : '0s';
       
-    const avgScrollDepth = basicStats.totalScrollDepth && totalClicks > 0
-      ? `${Math.round((basicStats.totalScrollDepth / totalClicks) * 100)}%`
+    const avgScrollDepth = basicStats.clicksWithSessionData > 0
+      ? `${Math.round((basicStats.totalScrollDepth / basicStats.clicksWithSessionData))}%`
       : '0%';
       
-    const avgTimeToClick = basicStats.totalTimeToClick && basicStats.clicksWithTimeToClick > 0
+    const avgTimeToClick = basicStats.clicksWithTimeToClick > 0
       ? `${Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)}s`
       : 'N/A';
     
@@ -559,6 +618,12 @@ const getUrlAnalytics = async (req, res) => {
     
     const topReferrerData = stats.referrers[0];
     const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
+    
+    // Calculate pages per session from session data
+    const sessionData = stats.sessionData || [];
+    const totalSessions = sessionData.length;
+    const totalPagesViewed = sessionData.reduce((sum, session) => sum + session.totalClicks, 0);
+    const pagesPerSession = totalSessions > 0 ? (totalPagesViewed / totalSessions).toFixed(1) : 1.0;
     
     // Time series with proper formatting
     const timeSeriesData = stats.timeSeries || [];
@@ -594,22 +659,13 @@ const getUrlAnalytics = async (req, res) => {
       visits: countryData.map(item => item.count)
     };
     
-    // Devices
-    const deviceData = stats.devices || [];
+    // Devices - FIXED: Proper device distribution
+    const deviceData = stats.devices[0] || { desktop: 0, mobile: 0, tablet: 0 };
     const deviceDistribution = {
-      devices: [0, 0, 0] // [desktop, mobile, tablet]
+      desktop: deviceData.desktop || 0,
+      mobile: deviceData.mobile || 0,
+      tablet: deviceData.tablet || 0
     };
-    
-    deviceData.forEach(item => {
-      const deviceType = (item._id || '').toLowerCase();
-      if (deviceType.includes('desktop')) {
-        deviceDistribution.devices[0] = item.count;
-      } else if (deviceType.includes('mobile')) {
-        deviceDistribution.devices[1] = item.count;
-      } else if (deviceType.includes('tablet')) {
-        deviceDistribution.devices[2] = item.count;
-      }
-    });
     
     // Calculate actual engagement metrics
     const engagedClicks = await Click.countDocuments({
@@ -654,7 +710,7 @@ const getUrlAnalytics = async (req, res) => {
           avgSessionDuration: avgTimeOnPage,
           peakHour,
           topReferrer,
-          pagesPerSession: (engagedClicks > 0 ? (totalClicks / engagedClicks).toFixed(1) : 1.0),
+          pagesPerSession: parseFloat(pagesPerSession),
           conversionRate
         }
       }

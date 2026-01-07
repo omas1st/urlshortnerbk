@@ -51,4 +51,7 @@ router.get('/public/:shortId', controller.getUrlByShortId);
 // QR Codes endpoints
 router.get('/qr-codes', auth, controller.getUserQRCodes); // Add this line
 
+// Overall analytics endpoint
+router.get('/overall-analytics', auth, analyticsController.getOverallAnalytics);
+
 module.exports = router;
