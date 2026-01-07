@@ -36,6 +36,7 @@ const analyticsRoutes = require('./routes/analyticsRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const helpRoutes = require('./routes/helpRoutes');
+const customDomainRoutes = require('./routes/customDomainRoutes');
 
 const Url = require('./models/Url');
 const Click = require('./models/Click');
@@ -451,6 +452,105 @@ function visitorMatchesRule(ruleType, ruleValue, userAgent, ip, uaParser) {
       return false;
   }
 }
+
+// Custom domain redirect handler
+const handleCustomDomainRedirect = async (req, res) => {
+  try {
+    const host = req.headers.host;
+    const path = req.path.substring(1); // Remove leading slash
+    
+    // Skip if it's our own domain
+    const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+    const baseHost = new URL(baseUrl).hostname;
+    
+    if (host === baseHost || host.includes('localhost')) {
+      return false; // Let normal redirect handle it
+    }
+    
+    // Look up custom domain
+    const CustomDomain = require('./models/CustomDomain');
+    const customDomain = await CustomDomain.findOne({ 
+      domain: host,
+      status: 'active'
+    });
+    
+    if (!customDomain) {
+      return false;
+    }
+    
+    // If path matches branded short ID
+    if (path === customDomain.brandedShortId || path === '') {
+      // Find the original URL
+      const Url = require('./models/Url');
+      const url = await Url.findOne({ shortId: customDomain.shortId });
+      
+      if (!url) {
+        return res.status(404).json({ success: false, message: 'URL not found' });
+      }
+      
+      // Check if URL is active
+      if (!url.isActive) {
+        return res.status(403).json({ success: false, message: 'URL is inactive' });
+      }
+      
+      // Handle expiration
+      if (url.expirationDate && new Date() > new Date(url.expirationDate)) {
+        url.isActive = false;
+        await url.save();
+        return res.status(410).json({ success: false, message: 'URL has expired' });
+      }
+      
+      // Increment clicks
+      url.clicks = (url.clicks || 0) + 1;
+      url.lastClicked = new Date();
+      await url.save();
+      
+      // Record click with custom domain info
+      const Click = require('./models/Click');
+      const userAgent = req.headers['user-agent'] || '';
+      const ip = req.ip || req.headers['x-forwarded-for'] || 'Unknown';
+      const uaParser = UA(userAgent);
+      
+      const clickData = {
+        urlId: url._id,
+        ipAddress: ip,
+        userAgent: userAgent,
+        referrer: req.headers.referer || req.headers.referrer || 'Direct',
+        timestamp: new Date(),
+        country: getCountryFromIP(ip),
+        device: detectDeviceType(userAgent),
+        browser: uaParser.browser.name || 'Unknown',
+        customDomain: customDomain.domain,
+        isBranded: true
+      };
+      
+      const click = new Click(clickData);
+      await click.save();
+      
+      // Redirect to destination
+      return res.redirect(302, url.destinationUrl);
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Custom domain redirect error:', error);
+    return false;
+  }
+};
+
+// Add middleware to check custom domains before normal redirects
+app.use(async (req, res, next) => {
+  // Skip API routes
+  if (req.path.startsWith('/api') || req.path.startsWith('/s/')) {
+    return next();
+  }
+  
+  // Handle custom domain redirect
+  const handled = await handleCustomDomainRedirect(req, res);
+  if (!handled) {
+    next();
+  }
+});
 
 // SHORT URL REDIRECT ENDPOINT - FIXED VERSION: Multiple destinations work independently of smartDynamicLinks flag
 app.get('/s/:shortId', async (req, res) => {
@@ -1148,6 +1248,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/help', helpRoutes);
+app.use('/api/custom-domains', customDomainRoutes);
 
 // Serve frontend build if present
 const buildPath = process.env.FRONTEND_BUILD_PATH || path.join(__dirname, 'client', 'build');

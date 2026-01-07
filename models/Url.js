@@ -45,6 +45,17 @@ const urlSchema = new mongoose.Schema({
     trim: true,
     maxlength: [50, 'Custom name cannot exceed 50 characters']
   },
+  // Branded Domains
+  brandedDomains: [{
+    domain: String,
+    brandedShortId: String,
+    customDomainId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CustomDomain'
+    },
+    createdAt: Date,
+    isActive: Boolean
+  }],
   // Security & Access
   password: {
     type: String, // Encrypted password
@@ -185,6 +196,19 @@ urlSchema.virtual('shortUrl').get(function() {
   return `${process.env.BASE_URL || 'http://localhost:5000'}/s/${this.shortId}`;
 });
 
+// Virtual for branded URLs
+urlSchema.virtual('brandedUrls').get(function() {
+  if (!this.brandedDomains || this.brandedDomains.length === 0) return [];
+  
+  return this.brandedDomains.map(bd => ({
+    url: `https://${bd.domain}/${bd.brandedShortId}`,
+    domain: bd.domain,
+    shortId: bd.brandedShortId,
+    isActive: bd.isActive,
+    customDomainId: bd.customDomainId
+  }));
+});
+
 // Indexes
 // NOTE: shortId is defined with `unique: true` on the field above, so we must NOT declare a second non-unique index for it.
 // Removed: urlSchema.index({ shortId: 1 });
@@ -194,6 +218,10 @@ urlSchema.index({ clicks: -1 });
 urlSchema.index({ expirationDate: 1 });
 urlSchema.index({ isActive: 1, isRestricted: 1 });
 urlSchema.index({ tags: 1 });
+// Add indexes for brandedDomains queries
+urlSchema.index({ 'brandedDomains.domain': 1 });
+urlSchema.index({ 'brandedDomains.brandedShortId': 1 });
+urlSchema.index({ 'brandedDomains.customDomainId': 1 });
 
 // Pre-save middleware
 urlSchema.pre('save', async function() {
