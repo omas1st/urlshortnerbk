@@ -51,22 +51,115 @@ const getDateRange = (range, customStartDate, customEndDate) => {
   return { startDate, endDate };
 };
 
-// Get overall analytics for user
+// Helper function to categorize referrers
+const categorizeReferrers = (referrers) => {
+  const socialPlatforms = ['facebook', 'twitter', 'whatsapp', 'instagram', 'linkedin', 'pinterest', 'tiktok', 'reddit'];
+  const searchEngines = ['google', 'bing', 'yahoo', 'duckduckgo', 'baidu', 'yandex'];
+  
+  const categories = {
+    social: { total: 0, details: {} },
+    search: { total: 0, details: {} },
+    email: { total: 0, details: {} },
+    direct: { total: 0, details: {} },
+    others: { total: 0, details: {} }
+  };
+  
+  referrers.forEach(ref => {
+    const source = ref._id ? ref._id.toLowerCase() : '';
+    const count = ref.count;
+    
+    if (source === 'direct' || source === '') {
+      categories.direct.total += count;
+      categories.direct.details[source] = (categories.direct.details[source] || 0) + count;
+    } 
+    else if (socialPlatforms.some(platform => source.includes(platform))) {
+      categories.social.total += count;
+      categories.social.details[source] = (categories.social.details[source] || 0) + count;
+    }
+    else if (searchEngines.some(engine => source.includes(engine))) {
+      categories.search.total += count;
+      categories.search.details[source] = (categories.search.details[source] || 0) + count;
+    }
+    else if (source.includes('mail') || source.includes('email')) {
+      categories.email.total += count;
+      categories.email.details[source] = (categories.email.details[source] || 0) + count;
+    }
+    else {
+      categories.others.total += count;
+      categories.others.details[source] = (categories.others.details[source] || 0) + count;
+    }
+  });
+  
+  return categories;
+};
+
+// Helper function to get previous period clicks for comparison
+const getPreviousPeriodClicks = async (urlIds, currentStartDate, currentEndDate) => {
+  try {
+    const periodDuration = currentEndDate - currentStartDate;
+    const previousStartDate = new Date(currentStartDate.getTime() - periodDuration);
+    const previousEndDate = new Date(currentStartDate.getTime());
+    
+    let previousClicksMap = {};
+    
+    if (Array.isArray(urlIds)) {
+      // For overall analytics, get previous clicks for all URLs
+      const previousClicks = await Click.aggregate([
+        {
+          $match: {
+            urlId: { $in: urlIds },
+            timestamp: { $gte: previousStartDate, $lt: previousEndDate },
+            isBot: false
+          }
+        },
+        {
+          $group: {
+            _id: '$urlId',
+            count: { $sum: 1 }
+          }
+        }
+      ]);
+      
+      previousClicks.forEach(item => {
+        previousClicksMap[item._id.toString()] = item.count;
+      });
+    } else {
+      // For single URL
+      const previousClicks = await Click.countDocuments({
+        urlId: urlIds,
+        timestamp: { $gte: previousStartDate, $lt: previousEndDate },
+        isBot: false
+      });
+      
+      previousClicksMap[urlIds] = previousClicks;
+    }
+    
+    return previousClicksMap;
+  } catch (error) {
+    console.error('Error getting previous period clicks:', error);
+    return {};
+  }
+};
+
+// Get overall analytics - UPDATED with new chart data
 const getOverallAnalytics = async (req, res) => {
   try {
-    const { range = '7days', startDate: customStartDate, endDate: customEndDate } = req.query;
     const userId = req.user._id;
+    const { range = '7days', startDate: customStartDate, endDate: customEndDate } = req.query;
     
     console.log(`Getting overall analytics for user ${userId}, range: ${range}`);
     
     // Calculate date range
     const { startDate, endDate } = getDateRange(range, customStartDate, customEndDate);
     
-    // Get user's URLs
-    const userUrls = await Url.find({ user: userId }).select('_id shortId destinationUrl').lean();
-    const urlIds = userUrls.map(url => url._id);
+    // Calculate previous period for comparison
+    const periodDuration = endDate - startDate;
+    const previousStartDate = new Date(startDate.getTime() - periodDuration);
+    const previousEndDate = new Date(startDate.getTime());
     
-    console.log(`User has ${urlIds.length} URLs, date range: ${startDate} to ${endDate}`);
+    // Get all user URLs
+    const userUrls = await Url.find({ user: userId }).select('_id shortId destinationUrl customName clicks').lean();
+    const urlIds = userUrls.map(url => url._id);
     
     if (urlIds.length === 0) {
       return res.json({
@@ -77,9 +170,8 @@ const getOverallAnalytics = async (req, res) => {
           returningVisitors: 0,
           conversionRate: '0%',
           totalUrls: 0,
-          topUrls: [],
           clicksOverTime: { labels: [], values: [] },
-          topCountries: { rawData: [], countries: [], visits: [] },
+          topCountries: { countries: [], visits: [] },
           deviceDistribution: { desktop: 0, mobile: 0, tablet: 0 },
           engagement: { bounced: 0, engaged: 0, bounceRate: 0 },
           recentClicks: [],
@@ -88,14 +180,27 @@ const getOverallAnalytics = async (req, res) => {
             avgScrollDepth: '0%',
             peakHour: 'N/A',
             topReferrer: 'Direct',
-            avgSessionDuration: '0s',
-            pagesPerSession: 1.0
-          }
+            avgSessionDuration: '0:00',
+            pagesPerSession: 0
+          },
+          // NEW CHART DATA
+          browserDistribution: [],
+          osDistribution: [],
+          referrerCategories: {
+            social: { total: 0, details: {} },
+            search: { total: 0, details: {} },
+            email: { total: 0, details: {} },
+            direct: { total: 0, details: {} },
+            others: { total: 0, details: {} }
+          },
+          peakHourData: [],
+          topCities: [],
+          topLinks: []
         }
       });
     }
     
-    // Get click statistics with aggregation for better performance
+    // Aggregate clicks across all user URLs with ALL new chart data
     const clickStats = await Click.aggregate([
       {
         $match: {
@@ -106,7 +211,7 @@ const getOverallAnalytics = async (req, res) => {
       },
       {
         $facet: {
-          // Total and unique clicks
+          // Basic stats
           basicStats: [
             {
               $group: {
@@ -114,17 +219,16 @@ const getOverallAnalytics = async (req, res) => {
                 totalClicks: { $sum: 1 },
                 uniqueIPs: { $addToSet: '$ipAddress' },
                 returningVisitors: { $sum: { $cond: ['$isReturning', 1, 0] } },
-                totalTimeOnPage: { $sum: { $cond: [{ $gt: ['$timeOnPage', 0] }, '$timeOnPage', 0] } },
-                totalScrollDepth: { $sum: { $cond: [{ $gt: ['$scrollDepth', 0] }, '$scrollDepth', 0] } },
-                clicksWithTimeToClick: { $sum: { $cond: [{ $gt: ['$timeToClick', 0] }, 1, 0] } },
-                totalTimeToClick: { $sum: { $cond: [{ $gt: ['$timeToClick', 0] }, '$timeToClick', 0] } },
-                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } },
-                clicksWithSessionData: { $sum: { $cond: [{ $gt: ['$timeOnPage', 0] }, 1, 0] } }
+                totalTimeOnPage: { $sum: '$timeOnPage' },
+                totalScrollDepth: { $sum: '$scrollDepth' },
+                clicksWithTimeToClick: { $sum: { $cond: ['$timeToClick', 1, 0] } },
+                totalTimeToClick: { $sum: '$timeToClick' },
+                conversions: { $sum: { $cond: ['$isConversion', 1, 0] } }
               }
             }
           ],
           
-          // Clicks by date for time series - adjust grouping based on range
+          // Time series
           timeSeries: [
             {
               $group: {
@@ -144,7 +248,7 @@ const getOverallAnalytics = async (req, res) => {
           countries: [
             {
               $match: {
-                country: { $exists: true, $ne: null, $ne: '' }
+                country: { $exists: true, $ne: null }
               }
             },
             {
@@ -157,38 +261,106 @@ const getOverallAnalytics = async (req, res) => {
             { $limit: 10 }
           ],
           
-          // Device distribution - FIXED: Proper aggregation for device types
+          // Devices
           devices: [
             {
               $group: {
-                _id: null,
-                desktop: {
-                  $sum: {
-                    $cond: [
-                      { $regexMatch: { input: '$device', regex: /desktop/i } },
-                      1,
-                      0
-                    ]
-                  }
-                },
-                mobile: {
-                  $sum: {
-                    $cond: [
-                      { $regexMatch: { input: '$device', regex: /mobile/i } },
-                      1,
-                      0
-                    ]
-                  }
-                },
-                tablet: {
-                  $sum: {
-                    $cond: [
-                      { $regexMatch: { input: '$device', regex: /tablet/i } },
-                      1,
-                      0
-                    ]
-                  }
-                }
+                _id: '$device',
+                count: { $sum: 1 }
+              }
+            }
+          ],
+          
+          // Browsers - NEW
+          browsers: [
+            {
+              $match: {
+                browser: { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: '$browser',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+          ],
+          
+          // Operating Systems - NEW
+          operatingSystems: [
+            {
+              $match: {
+                os: { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: '$os',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+          ],
+          
+          // Referrers - NEW
+          referrers: [
+            {
+              $match: {
+                referrerDomain: { $exists: true, $ne: null, $ne: '' }
+              }
+            },
+            {
+              $group: {
+                _id: '$referrerDomain',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 20 }
+          ],
+          
+          // Peak hours - NEW
+          peakHours: [
+            {
+              $group: {
+                _id: { $hour: '$timestamp' },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { _id: 1 } },
+            {
+              $project: {
+                hour: '$_id',
+                count: 1,
+                _id: 0
+              }
+            }
+          ],
+          
+          // Top cities - NEW
+          topCities: [
+            {
+              $match: {
+                city: { $exists: true, $ne: null, $ne: '' }
+              }
+            },
+            {
+              $group: {
+                _id: { city: '$city', country: '$country' },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 10 },
+            {
+              $project: {
+                city: '$_id.city',
+                country: '$_id.country',
+                count: 1,
+                _id: 0
               }
             }
           ],
@@ -199,49 +371,16 @@ const getOverallAnalytics = async (req, res) => {
             { $limit: 10 }
           ],
           
-          // Peak hour - FIXED: Proper hour aggregation
-          peakHour: [
+          // URL clicks for top links
+          urlClicks: [
             {
               $group: {
-                _id: { $hour: '$timestamp' },
-                count: { $sum: 1 }
+                _id: '$urlId',
+                clicks: { $sum: 1 }
               }
             },
-            { $sort: { count: -1 } },
-            { $limit: 1 }
-          ],
-          
-          // Referrers - FIXED: Proper referrer domain handling
-          referrers: [
-            {
-              $match: {
-                referrerDomain: { $exists: true, $ne: null, $ne: 'invalid' }
-              }
-            },
-            {
-              $group: {
-                _id: '$referrerDomain',
-                count: { $sum: 1 }
-              }
-            },
-            { $sort: { count: -1 } },
-            { $limit: 5 }
-          ],
-          
-          // Session data for pages/session calculation
-          sessionData: [
-            {
-              $match: {
-                timeOnPage: { $gt: 0 }
-              }
-            },
-            {
-              $group: {
-                _id: '$sessionId',
-                totalClicks: { $sum: 1 },
-                avgTimeOnPage: { $avg: '$timeOnPage' }
-              }
-            }
+            { $sort: { clicks: -1 } },
+            { $limit: 10 }
           ]
         }
       }
@@ -256,8 +395,7 @@ const getOverallAnalytics = async (req, res) => {
       totalScrollDepth: 0,
       clicksWithTimeToClick: 0,
       totalTimeToClick: 0,
-      conversions: 0,
-      clicksWithSessionData: 0
+      conversions: 0
     };
     
     const totalClicks = basicStats.totalClicks || 0;
@@ -265,43 +403,40 @@ const getOverallAnalytics = async (req, res) => {
     const returningVisitors = basicStats.returningVisitors || 0;
     const conversions = basicStats.conversions || 0;
     
-    // Calculate detailed metrics based on actual data
-    const avgTimeOnPage = basicStats.clicksWithSessionData > 0 
-      ? `${Math.round(basicStats.totalTimeOnPage / basicStats.clicksWithSessionData)}s`
+    // Calculate metrics
+    const avgTimeOnPage = basicStats.totalTimeOnPage && totalClicks > 0 
+      ? `${Math.floor(basicStats.totalTimeOnPage / totalClicks)}s`
       : '0s';
       
-    const avgScrollDepth = basicStats.clicksWithSessionData > 0
-      ? `${Math.round((basicStats.totalScrollDepth / basicStats.clicksWithSessionData))}%`
+    const avgScrollDepth = basicStats.totalScrollDepth && totalClicks > 0
+      ? `${Math.round((basicStats.totalScrollDepth / totalClicks) * 100)}%`
       : '0%';
       
-    const avgTimeToClick = basicStats.clicksWithTimeToClick > 0
+    const avgTimeToClick = basicStats.totalTimeToClick && basicStats.clicksWithTimeToClick > 0
       ? `${Math.round(basicStats.totalTimeToClick / basicStats.clicksWithTimeToClick / 1000)}s`
       : 'N/A';
     
-    const peakHourData = stats.peakHour[0];
-    const peakHour = peakHourData ? `${peakHourData._id}:00` : 'N/A';
+    const conversionRate = totalClicks > 0 
+      ? `${((conversions / totalClicks) * 100).toFixed(1)}%`
+      : '0%';
+    
+    const peakHourData = stats.peakHours || [];
+    const peakHour = peakHourData.length > 0 ? 
+      peakHourData.reduce((max, curr) => curr.count > max.count ? curr : peakHourData[0]) : null;
     
     const topReferrerData = stats.referrers[0];
     const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
     
-    // Calculate pages per session from session data
-    const sessionData = stats.sessionData || [];
-    const totalSessions = sessionData.length;
-    const totalPagesViewed = sessionData.reduce((sum, session) => sum + session.totalClicks, 0);
-    const pagesPerSession = totalSessions > 0 ? (totalPagesViewed / totalSessions).toFixed(1) : 1.0;
-    
-    // Time series data with proper formatting
+    // Time series
     const timeSeriesData = stats.timeSeries || [];
     const clicksOverTime = {
       labels: timeSeriesData.map(item => {
         const dateStr = item._id;
         if (range === 'all' && /^\d{4}-\d{2}$/.test(dateStr)) {
-          // Format as "Jan 2024" for monthly data
           const [year, month] = dateStr.split('-');
           const date = new Date(year, month - 1);
           return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
         } else {
-          // Format as "MMM DD" for daily data
           try {
             const date = new Date(dateStr);
             return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -313,7 +448,7 @@ const getOverallAnalytics = async (req, res) => {
       values: timeSeriesData.map(item => item.count)
     };
     
-    // Country data
+    // Countries
     const countryData = stats.countries || [];
     const topCountries = {
       rawData: countryData.map(item => ({
@@ -324,20 +459,31 @@ const getOverallAnalytics = async (req, res) => {
       visits: countryData.map(item => item.count)
     };
     
-    // Device data - FIXED: Proper device distribution
-    const deviceData = stats.devices[0] || { desktop: 0, mobile: 0, tablet: 0 };
+    // Devices
+    const deviceData = stats.devices || [];
     const deviceDistribution = {
-      desktop: deviceData.desktop || 0,
-      mobile: deviceData.mobile || 0,
-      tablet: deviceData.tablet || 0
+      desktop: 0,
+      mobile: 0,
+      tablet: 0
     };
     
-    // Calculate actual engagement metrics
+    deviceData.forEach(item => {
+      const deviceType = (item._id || '').toLowerCase();
+      if (deviceType.includes('desktop')) {
+        deviceDistribution.desktop = item.count;
+      } else if (deviceType.includes('mobile')) {
+        deviceDistribution.mobile = item.count;
+      } else if (deviceType.includes('tablet')) {
+        deviceDistribution.tablet = item.count;
+      }
+    });
+    
+    // Engagement
     const engagedClicks = await Click.countDocuments({
       urlId: { $in: urlIds },
       timestamp: { $gte: startDate, $lte: endDate },
       isBot: false,
-      timeOnPage: { $gt: 30 } // Consider engaged if spent more than 30 seconds
+      timeOnPage: { $gt: 30 }
     });
     
     const bounceRate = totalClicks > 0 ? Math.round(((totalClicks - engagedClicks) / totalClicks) * 100) : 0;
@@ -350,8 +496,74 @@ const getOverallAnalytics = async (req, res) => {
     // Recent clicks
     const recentClicks = stats.recentClicks || [];
     
-    // Calculate actual conversion rate
-    const conversionRate = totalClicks > 0 ? ((conversions / totalClicks) * 100).toFixed(1) : 0;
+    // NEW: Browser distribution
+    const browserData = stats.browsers || [];
+    const browserDistribution = browserData.map(item => ({
+      _id: item._id,
+      browser: item._id,
+      count: item.count
+    }));
+    
+    // NEW: OS distribution
+    const osData = stats.operatingSystems || [];
+    const osDistribution = osData.map(item => ({
+      _id: item._id,
+      os: item._id,
+      count: item.count
+    }));
+    
+    // NEW: Referrer categories
+    const referrerData = stats.referrers || [];
+    const referrerCategories = categorizeReferrers(referrerData);
+    
+    // NEW: Peak hour data
+    const peakHourDataFormatted = peakHourData.map(item => ({
+      hour: item.hour,
+      count: item.count
+    }));
+    
+    // NEW: Top cities
+    const cityData = stats.topCities || [];
+    const topCities = cityData.map(item => ({
+      city: item.city,
+      country: item.country,
+      count: item.count
+    }));
+    
+    // NEW: Top performing links with comparison
+    const urlClicksData = stats.urlClicks || [];
+    const topLinks = await Promise.all(urlClicksData.map(async (item) => {
+      const url = userUrls.find(u => u._id.toString() === item._id.toString());
+      if (!url) return null;
+      
+      // Get previous period clicks for this URL
+      const previousClicks = await Click.countDocuments({
+        urlId: url._id,
+        timestamp: { $gte: previousStartDate, $lt: previousEndDate },
+        isBot: false
+      });
+      
+      const change = item.clicks - previousClicks;
+      const changePercent = previousClicks > 0 ? 
+        ((change / previousClicks) * 100).toFixed(1) : 
+        (item.clicks > 0 ? 100 : 0);
+      
+      return {
+        _id: url._id,
+        shortId: url.shortId,
+        alias: url.customName || url.shortId,
+        destinationUrl: url.destinationUrl,
+        clicks: item.clicks,
+        previousClicks: previousClicks,
+        change: change,
+        changePercent: parseFloat(changePercent)
+      };
+    }));
+    
+    // Filter out null values and sort
+    const filteredTopLinks = topLinks
+      .filter(link => link !== null)
+      .sort((a, b) => b.clicks - a.clicks);
     
     res.json({
       success: true,
@@ -359,14 +571,8 @@ const getOverallAnalytics = async (req, res) => {
         totalClicks,
         uniqueVisitors,
         returningVisitors,
-        conversionRate: `${conversionRate}%`,
+        conversionRate,
         totalUrls: urlIds.length,
-        topUrls: userUrls.slice(0, 5).map(url => ({
-          id: url._id,
-          shortId: url.shortId,
-          destinationUrl: url.destinationUrl ? url.destinationUrl.substring(0, 50) + '...' : 'Unknown',
-          clicks: Math.floor(totalClicks / Math.max(1, urlIds.length))
-        })),
         clicksOverTime,
         topCountries,
         deviceDistribution,
@@ -384,11 +590,18 @@ const getOverallAnalytics = async (req, res) => {
           avgTimeToClick,
           avgScrollDepth,
           avgSessionDuration: avgTimeOnPage,
-          peakHour,
+          peakHour: peakHour ? `${peakHour.hour}:00` : 'N/A',
           topReferrer,
-          pagesPerSession: parseFloat(pagesPerSession),
-          conversionRate: `${conversionRate}%`
-        }
+          pagesPerSession: (engagedClicks > 0 ? (totalClicks / engagedClicks).toFixed(1) : 1.0),
+          conversionRate
+        },
+        // NEW CHART DATA
+        browserDistribution,
+        osDistribution,
+        referrerCategories,
+        peakHourData: peakHourDataFormatted,
+        topCities,
+        topLinks: filteredTopLinks
       }
     });
     
@@ -396,12 +609,12 @@ const getOverallAnalytics = async (req, res) => {
     console.error('Get overall analytics error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to get analytics: ' + (error.message || 'Unknown error')
+      message: 'Failed to get overall analytics: ' + (error.message || 'Unknown error')
     });
   }
 };
 
-// Get URL-specific analytics
+// Get URL-specific analytics - UPDATED with new chart data
 const getUrlAnalytics = async (req, res) => {
   try {
     const { id } = req.params;
@@ -426,7 +639,12 @@ const getUrlAnalytics = async (req, res) => {
     // Calculate date range
     const { startDate, endDate } = getDateRange(range, customStartDate, customEndDate);
     
-    // Get click statistics with aggregation
+    // Calculate previous period for comparison
+    const periodDuration = endDate - startDate;
+    const previousStartDate = new Date(startDate.getTime() - periodDuration);
+    const previousEndDate = new Date(startDate.getTime());
+    
+    // Get click statistics with aggregation including ALL new chart data
     const clickStats = await Click.aggregate([
       {
         $match: {
@@ -455,7 +673,7 @@ const getUrlAnalytics = async (req, res) => {
             }
           ],
           
-          // Time series - adjust grouping based on range
+          // Time series
           timeSeries: [
             {
               $group: {
@@ -488,7 +706,7 @@ const getUrlAnalytics = async (req, res) => {
             { $limit: 10 }
           ],
           
-          // Device distribution - FIXED: Proper aggregation for device types
+          // Devices
           devices: [
             {
               $group: {
@@ -524,25 +742,41 @@ const getUrlAnalytics = async (req, res) => {
             }
           ],
           
-          // Recent clicks
-          recentClicks: [
-            { $sort: { timestamp: -1 } },
-            { $limit: 10 }
-          ],
-          
-          // Peak hour - FIXED: Proper hour aggregation
-          peakHour: [
+          // Browsers - NEW
+          browsers: [
+            {
+              $match: {
+                browser: { $exists: true, $ne: null }
+              }
+            },
             {
               $group: {
-                _id: { $hour: '$timestamp' },
+                _id: '$browser',
                 count: { $sum: 1 }
               }
             },
             { $sort: { count: -1 } },
-            { $limit: 1 }
+            { $limit: 10 }
           ],
           
-          // Referrers - FIXED: Proper referrer domain handling
+          // Operating Systems - NEW
+          operatingSystems: [
+            {
+              $match: {
+                os: { $exists: true, $ne: null }
+              }
+            },
+            {
+              $group: {
+                _id: '$os',
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+          ],
+          
+          // Referrers - NEW
           referrers: [
             {
               $match: {
@@ -556,23 +790,56 @@ const getUrlAnalytics = async (req, res) => {
               }
             },
             { $sort: { count: -1 } },
-            { $limit: 5 }
+            { $limit: 20 }
           ],
           
-          // Session data for pages/session calculation
-          sessionData: [
+          // Peak hours - NEW
+          peakHours: [
+            {
+              $group: {
+                _id: { $hour: '$timestamp' },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { _id: 1 } },
+            {
+              $project: {
+                hour: '$_id',
+                count: 1,
+                _id: 0
+              }
+            }
+          ],
+          
+          // Top cities - NEW
+          topCities: [
             {
               $match: {
-                timeOnPage: { $gt: 0 }
+                city: { $exists: true, $ne: null, $ne: '' }
               }
             },
             {
               $group: {
-                _id: '$sessionId',
-                totalClicks: { $sum: 1 },
-                avgTimeOnPage: { $avg: '$timeOnPage' }
+                _id: { city: '$city', country: '$country' },
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } },
+            { $limit: 10 },
+            {
+              $project: {
+                city: '$_id.city',
+                country: '$_id.country',
+                count: 1,
+                _id: 0
               }
             }
+          ],
+          
+          // Recent clicks
+          recentClicks: [
+            { $sort: { timestamp: -1 } },
+            { $limit: 10 }
           ]
         }
       }
@@ -596,9 +863,9 @@ const getUrlAnalytics = async (req, res) => {
     const returningVisitors = basicStats.returningVisitors || 0;
     const conversions = basicStats.conversions || 0;
     
-    // Calculate metrics based on actual data
+    // Calculate metrics
     const avgTimeOnPage = basicStats.clicksWithSessionData > 0 
-      ? `${Math.round(basicStats.totalTimeOnPage / basicStats.clicksWithSessionData)}s`
+      ? `${Math.floor(basicStats.totalTimeOnPage / basicStats.clicksWithSessionData)}s`
       : '0s';
       
     const avgScrollDepth = basicStats.clicksWithSessionData > 0
@@ -613,30 +880,22 @@ const getUrlAnalytics = async (req, res) => {
       ? `${((conversions / totalClicks) * 100).toFixed(1)}%`
       : '0%';
     
-    const peakHourData = stats.peakHour[0];
-    const peakHour = peakHourData ? `${peakHourData._id}:00` : 'N/A';
+    const peakHourStat = stats.peakHours[0];
+    const peakHour = peakHourStat ? `${peakHourStat.hour}:00` : 'N/A';
     
     const topReferrerData = stats.referrers[0];
     const topReferrer = topReferrerData ? topReferrerData._id : 'Direct';
     
-    // Calculate pages per session from session data
-    const sessionData = stats.sessionData || [];
-    const totalSessions = sessionData.length;
-    const totalPagesViewed = sessionData.reduce((sum, session) => sum + session.totalClicks, 0);
-    const pagesPerSession = totalSessions > 0 ? (totalPagesViewed / totalSessions).toFixed(1) : 1.0;
-    
-    // Time series with proper formatting
+    // Time series
     const timeSeriesData = stats.timeSeries || [];
     const clicksOverTime = {
       labels: timeSeriesData.map(item => {
         const dateStr = item._id;
         if (range === 'all' && /^\d{4}-\d{2}$/.test(dateStr)) {
-          // Format as "Jan 2024" for monthly data
           const [year, month] = dateStr.split('-');
           const date = new Date(year, month - 1);
           return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
         } else {
-          // Format as "MMM DD" for daily data
           try {
             const date = new Date(dateStr);
             return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -659,7 +918,7 @@ const getUrlAnalytics = async (req, res) => {
       visits: countryData.map(item => item.count)
     };
     
-    // Devices - FIXED: Proper device distribution
+    // Devices
     const deviceData = stats.devices[0] || { desktop: 0, mobile: 0, tablet: 0 };
     const deviceDistribution = {
       desktop: deviceData.desktop || 0,
@@ -667,12 +926,12 @@ const getUrlAnalytics = async (req, res) => {
       tablet: deviceData.tablet || 0
     };
     
-    // Calculate actual engagement metrics
+    // Engagement
     const engagedClicks = await Click.countDocuments({
       urlId: id,
       timestamp: { $gte: startDate, $lte: endDate },
       isBot: false,
-      timeOnPage: { $gt: 30 } // Consider engaged if spent more than 30 seconds
+      timeOnPage: { $gt: 30 }
     });
     
     const bounceRate = totalClicks > 0 ? Math.round(((totalClicks - engagedClicks) / totalClicks) * 100) : 0;
@@ -684,6 +943,65 @@ const getUrlAnalytics = async (req, res) => {
     
     // Recent clicks
     const recentClicks = stats.recentClicks || [];
+    
+    // NEW: Browser distribution
+    const browserData = stats.browsers || [];
+    const browserDistribution = browserData.map(item => ({
+      _id: item._id,
+      browser: item._id,
+      count: item.count
+    }));
+    
+    // NEW: OS distribution
+    const osData = stats.operatingSystems || [];
+    const osDistribution = osData.map(item => ({
+      _id: item._id,
+      os: item._id,
+      count: item.count
+    }));
+    
+    // NEW: Referrer categories
+    const referrerData = stats.referrers || [];
+    const referrerCategories = categorizeReferrers(referrerData);
+    
+    // NEW: Peak hour data
+    const peakHourArray = stats.peakHours || [];
+    const peakHourDataFormatted = peakHourArray.map(item => ({
+      hour: item.hour,
+      count: item.count
+    }));
+    
+    // NEW: Top cities
+    const cityData = stats.topCities || [];
+    const topCities = cityData.map(item => ({
+      city: item.city,
+      country: item.country,
+      count: item.count
+    }));
+    
+    // Get previous period clicks for comparison
+    const previousClicks = await Click.countDocuments({
+      urlId: id,
+      timestamp: { $gte: previousStartDate, $lt: previousEndDate },
+      isBot: false
+    });
+    
+    const change = totalClicks - previousClicks;
+    const changePercent = previousClicks > 0 ? 
+      ((change / previousClicks) * 100).toFixed(1) : 
+      (totalClicks > 0 ? 100 : 0);
+    
+    // NEW: Top links for single URL
+    const topLinks = [{
+      _id: url._id,
+      shortId: url.shortId,
+      alias: url.customName || url.shortId,
+      destinationUrl: url.destinationUrl,
+      clicks: totalClicks,
+      previousClicks: previousClicks,
+      change: change,
+      changePercent: parseFloat(changePercent)
+    }];
     
     res.json({
       success: true,
@@ -710,9 +1028,16 @@ const getUrlAnalytics = async (req, res) => {
           avgSessionDuration: avgTimeOnPage,
           peakHour,
           topReferrer,
-          pagesPerSession: parseFloat(pagesPerSession),
+          pagesPerSession: (engagedClicks > 0 ? (totalClicks / engagedClicks).toFixed(1) : 1.0),
           conversionRate
-        }
+        },
+        // NEW CHART DATA
+        browserDistribution,
+        osDistribution,
+        referrerCategories,
+        peakHourData: peakHourDataFormatted,
+        topCities,
+        topLinks
       }
     });
     
@@ -834,7 +1159,7 @@ const getAdminAnalytics = async (req, res) => {
         $group: {
           _id: {
             $dateToString: { 
-              format: range === 'all' ? '%Y-%m' : '%Y-%m-%d', 
+              format: range === 'all' ? '%Y-%m' : '%Y-%m-d', 
               date: '$createdAt' 
             }
           },
