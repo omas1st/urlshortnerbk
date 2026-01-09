@@ -538,10 +538,13 @@ const handleCustomDomainRedirect = async (req, res) => {
   }
 };
 
-// Add middleware to check custom domains before normal redirects
+// Add middleware to check custom domains before normal redirects - UPDATED VERSION
 app.use(async (req, res, next) => {
-  // Skip API routes
-  if (req.path.startsWith('/api') || req.path.startsWith('/s/')) {
+  // Skip API routes and known static paths
+  if (req.path.startsWith('/api') || 
+      req.path.startsWith('/static') ||
+      req.path.startsWith('/_next') ||
+      req.path.includes('.')) {  // Skip files with extensions
     return next();
   }
   
@@ -552,10 +555,37 @@ app.use(async (req, res, next) => {
   }
 });
 
-// SHORT URL REDIRECT ENDPOINT - FIXED VERSION: Multiple destinations work independently of smartDynamicLinks flag
-app.get('/s/:shortId', async (req, res) => {
+// SHORT URL REDIRECT ENDPOINT - IMPROVED VERSION
+app.get('/:shortId', async (req, res, next) => {
   try {
     const { shortId } = req.params;
+    
+    console.log(`\n=== Redirect endpoint called for shortId: ${shortId} ===`);
+    console.log(`Full path: ${req.path}`);
+    console.log(`Headers host: ${req.headers.host}`);
+    
+    // Get list of known frontend routes from environment variable or default list
+    const frontendRoutes = (process.env.FRONTEND_ROUTES || 'login,register,dashboard,analytics,generated-urls,qr-codes,brand-link,settings').split(',');
+    
+    // Define backend paths that should be skipped
+    const backendPaths = ['api', 'static', '_next', 'health', 'favicon.ico', 'sitemap.xml', 'robots.txt'];
+    
+    // Check if this is a known frontend route
+    const isFrontendRoute = frontendRoutes.includes(shortId);
+    
+    // Check if this is a backend path
+    const isBackendPath = backendPaths.some(path => shortId.startsWith(path));
+    
+    // Check if it looks like a file (has extension)
+    const isFile = shortId.includes('.') && !shortId.includes('/');
+    
+    // If it's a frontend route, backend path, or file, pass to next middleware
+    if (isFrontendRoute || isBackendPath || isFile) {
+      console.log(`Skipping ${shortId} because it's a ${isFrontendRoute ? 'frontend route' : isBackendPath ? 'backend path' : 'file'}`);
+      return next();
+    }
+    
+    console.log(`Processing ${shortId} as potential short URL`);
     
     if (!shortId) {
       return res.status(400).json({ 
@@ -564,16 +594,47 @@ app.get('/s/:shortId', async (req, res) => {
       });
     }
     
-    // Find the URL
-    const url = await Url.findOne({ shortId });
+    // Find the URL - check both shortId and customName
+    const url = await Url.findOne({ 
+      $or: [
+        { shortId: shortId },
+        { customName: shortId }
+      ]
+    });
     
     if (!url) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Short URL not found' 
-      });
+      console.log(`URL not found for ${shortId}, passing to frontend`);
+      
+      // Check if it's a custom domain URL
+      try {
+        const CustomDomain = require('./models/CustomDomain');
+        const customUrl = await CustomDomain.findOne({ 
+          brandedShortId: shortId,
+          status: 'active'
+        });
+        
+        if (customUrl) {
+          const originalUrl = await Url.findOne({ shortId: customUrl.shortId });
+          if (originalUrl) {
+            return res.redirect(302, originalUrl.destinationUrl);
+          }
+        }
+      } catch (customErr) {
+        console.warn('Custom domain check failed:', customErr.message);
+      }
+      
+      // Not found, let React handle it (will show 404)
+      return next();
     }
     
+    console.log(`Found URL for ${shortId}:`, {
+      shortId: url.shortId,
+      customName: url.customName,
+      destination: url.destinationUrl,
+      isActive: url.isActive
+    });
+    
+    // Rest of your existing redirect logic continues...
     // Check if URL is active
     if (!url.isActive) {
       return res.status(403).json({ 
@@ -605,13 +666,13 @@ app.get('/s/:shortId', async (req, res) => {
       const password = req.query.password;
       
       if (!password) {
-        // Serve password entry page (same as before)
+        // Serve password entry page - Use the correct path without /s/
         const passwordPage = `
           <!DOCTYPE html>
           <html lang="en">
             <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <meta charset="UTF-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1.0" />
               <title>Password Protected URL</title>
               <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -704,7 +765,7 @@ app.get('/s/:shortId', async (req, res) => {
                 <h1>Password Required</h1>
                 <p>This link is password protected. Please enter the password to continue.</p>
                 
-                <form class="password-form" action="/s/${shortId}" method="GET">
+                <form class="password-form" action="/${shortId}" method="GET">
                   <input type="password" 
                          name="password" 
                          class="password-input" 
@@ -749,7 +810,7 @@ app.get('/s/:shortId', async (req, res) => {
         return res.send(passwordPage);
       }
       
-      // FIXED PASSWORD VERIFICATION - Try multiple decryption methods
+      // FIXED PASSWORD VERIFICATION
       let decryptedPassword = null;
       
       try {
@@ -769,18 +830,17 @@ app.get('/s/:shortId', async (req, res) => {
       // Check if we got a valid decrypted password
       if (!decryptedPassword) {
         console.error('Could not decrypt password for URL:', shortId);
-        return res.redirect(`/s/${shortId}?error=1`);
+        return res.redirect(`/${shortId}?error=1`);
       }
       
       // Compare passwords
       if (password !== decryptedPassword) {
         console.log('Password mismatch for URL:', shortId);
-        return res.redirect(`/s/${shortId}?error=1`);
+        return res.redirect(`/${shortId}?error=1`);
       }
-      
-      // Password is correct - continue with redirect flow
     }
     
+    // Continue with the rest of your redirect logic (destinations, affiliate, splash, etc.)
     // ---------- Compute final destination first (so splash meta-refresh uses correct URL) ----------
     let finalDestination = url.destinationUrl;
 

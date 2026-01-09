@@ -183,17 +183,20 @@ const urlSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Virtual for QR code URL
+// Update the shortUrl virtual to not use /s/ prefix
+urlSchema.virtual('shortUrl').get(function() {
+  // Use FRONTEND_URL for the short URL, not BASE_URL
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  return `${frontendUrl}/${this.customName || this.shortId}`;  // Remove /s/ prefix
+});
+
+// Update the QR code virtual to use the new endpoint
 urlSchema.virtual('qrCodeUrl').get(function() {
   if (this.qrCodeData) {
     return this.qrCodeData;
   }
-  return `${process.env.BASE_URL}/api/urls/${this.shortId}/qr`;
-});
-
-// Virtual for short URL
-urlSchema.virtual('shortUrl').get(function() {
-  return `${process.env.BASE_URL || 'http://localhost:5000'}/s/${this.shortId}`;
+  // Use the short URL for QR code, not /s/ endpoint
+  return this.shortUrl;
 });
 
 // Virtual for branded URLs
@@ -247,11 +250,14 @@ urlSchema.pre('save', async function() {
     }
   }
   
+  // In pre-save middleware (around line 200):
   // Generate QR code data if requested
   if (this.generateQrCode && !this.qrCodeData) {
     const QRCode = require('qrcode');
     try {
-      this.qrCodeData = await QRCode.toDataURL(this.shortUrl, {
+      // Use the shortUrl virtual for QR code generation
+      const qrCodeUrl = this.shortUrl || `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${this.customName || this.shortId}`;
+      this.qrCodeData = await QRCode.toDataURL(qrCodeUrl, {
         errorCorrectionLevel: 'H',
         margin: 2,
         width: 300

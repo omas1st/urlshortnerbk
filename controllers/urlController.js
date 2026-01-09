@@ -449,7 +449,8 @@ const shortenUrl = async (req, res) => {
     let qrCodeData = null;
     if (generateQrCode) {
       try {
-        const qrCodeUrl = `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`;
+        // Use frontend URL for QR code (without /s/)
+        const qrCodeUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${customName || shortId}`;
         qrCodeData = await QRCode.toDataURL(qrCodeUrl, {
           errorCorrectionLevel: 'H',
           margin: 2,
@@ -505,7 +506,7 @@ const shortenUrl = async (req, res) => {
       id: url._id,
       _id: url._id,
       shortId: url.shortId,
-      shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`,
+      shortUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${url.customName || url.shortId}`,
       destinationUrl: url.destinationUrl,
       customName: url.customName,
       password: !!url.password,
@@ -644,7 +645,7 @@ const getUserUrls = async (req, res) => {
       id: u._id,
       _id: u._id,
       shortId: u.shortId,
-      shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${u.shortId}`,
+      shortUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${u.customName || u.shortId}`,
       destinationUrl: u.destinationUrl,
       customName: u.customName,
       password: !!u.password,
@@ -693,7 +694,7 @@ const getUrl = async (req, res) => {
       url: {
         id: url._id,
         shortId: url.shortId,
-        shortUrl: url.shortUrl,
+        shortUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${url.customName || url.shortId}`,
         destinationUrl: url.destinationUrl,
         customName: url.customName,
         password: !!url.password,
@@ -830,7 +831,8 @@ const updateUrl = async (req, res) => {
     // Handle QR code generation if generateQrCode is being enabled
     if (updates.generateQrCode !== undefined && updates.generateQrCode && !url.qrCodeData) {
       try {
-        const qrCodeUrl = `${process.env.BASE_URL || 'http://localhost:5000'}/s/${updates.shortId || url.shortId}`;
+        // Use frontend URL for QR code
+        const qrCodeUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${updates.customName || url.customName || updates.shortId || url.shortId}`;
         const qrCodeData = await QRCode.toDataURL(qrCodeUrl, {
           errorCorrectionLevel: 'H',
           margin: 2,
@@ -864,7 +866,7 @@ const updateUrl = async (req, res) => {
       url: {
         id: url._id,
         shortId: url.shortId,
-        shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`,
+        shortUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${url.customName || url.shortId}`,
         destinationUrl: url.destinationUrl,
         customName: url.customName,
         isActive: url.isActive,
@@ -2084,7 +2086,7 @@ const getRecentUrls = async (req, res) => {
     const mapped = recent.map(u => ({
       _id: u._id,
       shortId: u.shortId,
-      shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${u.shortId}`,
+      shortUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${u.customName || u.shortId}`,
       destinationUrl: u.destinationUrl,
       clicks: u.clicks || 0,
       createdAt: u.createdAt,
@@ -2213,7 +2215,7 @@ const getUrlByShortId = async (req, res) => {
       url: {
         id: url._id,
         shortId: url.shortId,
-        shortUrl: url.shortUrl,
+        shortUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${url.customName || url.shortId}`,
         destinationUrl: url.destinationUrl,
         customName: url.customName,
         password: !!url.password,
@@ -2317,7 +2319,7 @@ const getUserQRCodes = async (req, res) => {
       id: u._id,
       _id: u._id,
       shortId: u.shortId,
-      shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${u.shortId}`,
+      shortUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/${u.customName || u.shortId}`,
       destinationUrl: u.destinationUrl,
       customName: u.customName || '',
       clicks: u.clicks || 0,
