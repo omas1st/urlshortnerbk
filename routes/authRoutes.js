@@ -31,6 +31,10 @@ router.post('/forgot-password', safe(authController.forgotPassword, 'forgotPassw
 router.post('/reset-password', safe(authController.resetPassword, 'resetPassword'));
 router.post('/verify-email', safe(authController.verifyEmail, 'verifyEmail'));
 
+// NEW ROUTES FOR FORGOT PASSWORD FLOW
+router.post('/verify-identity', safe(authController.verifyIdentity, 'verifyIdentity'));
+router.post('/reset-password-via-identity', safe(authController.resetPasswordViaIdentity, 'resetPasswordViaIdentity'));
+
 // Protected routes (require authentication)
 router.get('/me', auth, safe(authController.getCurrentUser, 'getCurrentUser'));
 router.put('/profile', auth, safe(authController.updateProfile, 'updateProfile'));

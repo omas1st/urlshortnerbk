@@ -236,6 +236,166 @@ exports.login = async (req, res) => {
 };
 
 /**
+ * verifyIdentity - NEW FUNCTION
+ * Body: { email, username }
+ * Verifies that email and username match a user in database
+ */
+exports.verifyIdentity = async (req, res) => {
+  try {
+    const { email, username } = req.body || {};
+    
+    if (!email || !username) {
+      return res.status(400).json({ success: false, message: 'Email and username are required' });
+    }
+
+    if (!validator.isEmail(String(email))) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid email' });
+    }
+
+    const user = await User.findOne({ 
+      email: String(email).toLowerCase(), 
+      username: String(username).toLowerCase() 
+    });
+
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Email and username do not match. Please contact admin for password recovery.' 
+      });
+    }
+
+    if (!user.isActive) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Account is deactivated. Please contact admin.' 
+      });
+    }
+
+    // Generate a temporary verification token (not for reset, just for verification)
+    const verifyToken = crypto.randomBytes(32).toString('hex');
+    user.resetPasswordToken = verifyToken;
+    user.resetPasswordExpires = Date.now() + 900000; // 15 minutes
+    await user.save();
+
+    return res.json({ 
+      success: true, 
+      message: 'Identity verified successfully',
+      verifyToken 
+    });
+  } catch (err) {
+    return serverError(res, err, 'Verify identity error');
+  }
+};
+
+/**
+ * resetPasswordViaIdentity - NEW FUNCTION
+ * Body: { email, username, newPassword, confirmPassword }
+ * Resets password after identity verification
+ */
+exports.resetPasswordViaIdentity = async (req, res) => {
+  try {
+    const { email, username, newPassword, confirmPassword, verifyToken } = req.body || {};
+    
+    if (!email || !username || !newPassword || !confirmPassword) {
+      return res.status(400).json({ success: false, message: 'All fields are required' });
+    }
+
+    if (!validator.isEmail(String(email))) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid email' });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ success: false, message: 'Passwords do not match' });
+    }
+
+    if (String(newPassword).length < 8) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
+    }
+
+    const hasUpper = /[A-Z]/.test(newPassword);
+    const hasLower = /[a-z]/.test(newPassword);
+    const hasNumber = /\d/.test(newPassword);
+    if (!hasUpper || !hasLower || !hasNumber) {
+      return res.status(400).json({ success: false, message: 'Password must include uppercase, lowercase, and numbers' });
+    }
+
+    // Find user by email and username
+    const user = await User.findOne({ 
+      email: String(email).toLowerCase(), 
+      username: String(username).toLowerCase() 
+    }).select('+password');
+
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found. Please contact admin for password recovery.' 
+      });
+    }
+
+    // If verifyToken is provided, check it
+    if (verifyToken) {
+      if (!user.resetPasswordToken || user.resetPasswordToken !== verifyToken) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Verification token is invalid or expired' 
+        });
+      }
+
+      if (!user.resetPasswordExpires || user.resetPasswordExpires < Date.now()) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Verification token has expired. Please start the process again.' 
+        });
+      }
+    }
+
+    if (!user.isActive) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Account is deactivated. Please contact admin.' 
+      });
+    }
+
+    // Check if new password is same as old password
+    const isSamePassword = await user.comparePassword(newPassword);
+    if (isSamePassword) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'New password cannot be the same as the old password' 
+      });
+    }
+
+    // Update password
+    user.password = newPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    user.loginAttempts = 0; // Reset login attempts
+    user.lockUntil = undefined; // Unlock account if locked
+    await user.save();
+
+    // Send notification email if available
+    if (sendEmail) {
+      try {
+        await sendEmail({
+          to: user.email,
+          subject: 'Password Reset Successful',
+          html: `<p>Your password has been successfully reset. If you did not initiate this reset, please contact admin immediately.</p>`
+        });
+      } catch (emailErr) {
+        console.warn('[authController] Password reset notification email failed:', emailErr);
+      }
+    }
+
+    return res.json({ 
+      success: true, 
+      message: 'Password reset successfully. You can now log in with your new password.' 
+    });
+  } catch (err) {
+    return serverError(res, err, 'Reset password via identity error');
+  }
+};
+
+/**
  * getCurrentUser
  * Protected route (expects auth middleware to attach req.user)
  */
