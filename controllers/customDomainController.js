@@ -12,6 +12,19 @@ const validateDomain = (domain) => {
 };
 
 /**
+ * Helper to clean domain
+ */
+const cleanDomain = (domain) => {
+  if (!domain || typeof domain !== 'string') return domain;
+  return domain
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase()
+    .trim();
+};
+
+/**
  * Add a custom domain
  */
 const addCustomDomain = async (req, res) => {
@@ -25,16 +38,25 @@ const addCustomDomain = async (req, res) => {
       });
     }
 
-    // Validate domain format
-    if (!validateDomain(domain)) {
+    // Clean and validate domain
+    const cleanedDomain = cleanDomain(domain);
+    
+    if (!cleanedDomain) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid domain format'
+        message: 'Invalid domain'
+      });
+    }
+
+    if (!validateDomain(cleanedDomain)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid domain format. Please enter a valid domain like "yourbrand.com"'
       });
     }
 
     // Check if domain already exists
-    const existingDomain = await CustomDomain.findOne({ domain });
+    const existingDomain = await CustomDomain.findOne({ domain: cleanedDomain });
     if (existingDomain) {
       return res.status(400).json({
         success: false,
@@ -52,37 +74,61 @@ const addCustomDomain = async (req, res) => {
     }
 
     // Generate branded short ID
-    const brandedShortId = CustomDomain.generateBrandedShortId(domain, shortId);
+    const brandedShortId = CustomDomain.generateBrandedShortId(cleanedDomain, shortId);
+    
+    // Generate verification token
+    const verificationToken = crypto.randomBytes(16).toString('hex');
+
+    // Get DNS instructions
+    const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+    const baseDomain = new URL(baseUrl).hostname;
 
     // Create custom domain
     const customDomain = new CustomDomain({
       user: req.user._id,
-      domain,
+      domain: cleanedDomain,
       shortId,
       brandedShortId,
       status: 'pending',
-      verificationToken: crypto.randomBytes(16).toString('hex')
+      verificationToken,
+      dnsRecords: {
+        txtRecord: verificationToken,
+        cnameRecord: `links.${baseDomain}`
+      }
     });
-
-    // Generate DNS instructions
-    const dnsInstructions = customDomain.getDNSInstructions();
-    customDomain.dnsRecords = {
-      txtRecord: dnsInstructions.txt.value,
-      cnameRecord: dnsInstructions.cname.value
-    };
 
     await customDomain.save();
 
     // Update URL with branded domain reference
-    url.brandedDomains = url.brandedDomains || [];
+    if (!url.brandedDomains) {
+      url.brandedDomains = [];
+    }
+    
     url.brandedDomains.push({
-      domain,
+      domain: cleanedDomain,
       brandedShortId,
       customDomainId: customDomain._id,
       createdAt: new Date(),
       isActive: false
     });
+    
     await url.save();
+
+    // Prepare DNS instructions for response
+    const dnsInstructions = {
+      txt: {
+        type: 'TXT',
+        name: '_brandlink_verify',
+        value: verificationToken,
+        ttl: 3600
+      },
+      cname: {
+        type: 'CNAME',
+        name: '@',
+        value: `links.${baseDomain}`,
+        ttl: 3600
+      }
+    };
 
     res.status(201).json({
       success: true,
@@ -93,15 +139,37 @@ const addCustomDomain = async (req, res) => {
           domain: customDomain.domain,
           status: customDomain.status,
           verificationToken: customDomain.verificationToken,
+          brandedShortId: customDomain.brandedShortId,
           dnsInstructions
         }
       }
     });
   } catch (error) {
     console.error('Add custom domain error:', error);
+    
+    // Handle specific Mongoose validation errors
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join(', ')
+      });
+    }
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      const fieldName = field === 'domain' ? 'Domain' : 'Branded short ID';
+      return res.status(400).json({
+        success: false,
+        message: `${fieldName} already exists`
+      });
+    }
+    
     res.status(500).json({
       success: false,
-      message: 'Failed to add custom domain'
+      message: 'Failed to add custom domain',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -130,11 +198,19 @@ const verifyDomain = async (req, res) => {
     await customDomain.save();
 
     try {
+      console.log(`Attempting to verify domain: ${customDomain.domain}`);
+      console.log(`Looking for TXT record at: _brandlink_verify.${customDomain.domain}`);
+      console.log(`Expected token: ${customDomain.verificationToken}`);
+
       // Check TXT record
       const txtRecords = await dns.resolveTxt(`_brandlink_verify.${customDomain.domain}`);
+      console.log(`Found TXT records:`, JSON.stringify(txtRecords, null, 2));
+      
       const foundToken = txtRecords.flat().includes(customDomain.verificationToken);
       
       if (foundToken) {
+        console.log('✓ TXT record verified successfully');
+        
         // Update status
         customDomain.status = 'active';
         customDomain.lastVerifiedAt = new Date();
@@ -142,12 +218,13 @@ const verifyDomain = async (req, res) => {
 
         // Update URL branded domain status
         const url = await Url.findOne({ shortId: customDomain.shortId });
-        if (url) {
+        if (url && url.brandedDomains) {
           const brandIndex = url.brandedDomains.findIndex(
-            bd => bd.customDomainId.toString() === customDomain._id.toString()
+            bd => bd.customDomainId && bd.customDomainId.toString() === customDomain._id.toString()
           );
           if (brandIndex !== -1) {
             url.brandedDomains[brandIndex].isActive = true;
+            url.brandedDomains[brandIndex].verifiedAt = new Date();
             await url.save();
           }
         }
@@ -164,33 +241,67 @@ const verifyDomain = async (req, res) => {
           }
         });
       } else {
+        console.log('✗ TXT record not found or incorrect');
+        
         customDomain.status = 'pending';
         customDomain.verificationError = 'TXT record not found or incorrect';
         await customDomain.save();
 
         res.status(400).json({
           success: false,
-          message: 'DNS verification failed. TXT record not found.',
+          message: 'DNS verification failed. TXT record not found or incorrect.',
           data: {
             domain: customDomain.domain,
             status: customDomain.status,
             error: customDomain.verificationError,
-            instructions: customDomain.getDNSInstructions()
+            instructions: customDomain.getDNSInstructions(),
+            debug: {
+              expectedToken: customDomain.verificationToken,
+              foundRecords: txtRecords.flat(),
+              lookupDomain: `_brandlink_verify.${customDomain.domain}`
+            }
           }
         });
       }
     } catch (dnsError) {
+      console.error('DNS lookup error:', dnsError);
+      
+      // Provide user-friendly messages based on DNS error code
+      let userMessage = 'DNS lookup failed';
+      let detailedError = dnsError.message;
+      
+      if (dnsError.code === 'ENOTFOUND' || dnsError.code === 'ENODATA') {
+        userMessage = 'DNS record not found. Please make sure you added the TXT record correctly.';
+        detailedError = `No TXT record found for _brandlink_verify.${customDomain.domain}`;
+      } else if (dnsError.code === 'ETIMEOUT') {
+        userMessage = 'DNS lookup timed out. Please try again in a few minutes.';
+        detailedError = 'DNS server did not respond in time';
+      } else if (dnsError.code === 'ESERVFAIL') {
+        userMessage = 'DNS server failed to respond. Please check your domain configuration.';
+        detailedError = 'DNS server returned SERVFAIL';
+      }
+
       customDomain.status = 'pending';
-      customDomain.verificationError = dnsError.message;
+      customDomain.verificationError = detailedError;
       await customDomain.save();
 
       res.status(400).json({
         success: false,
-        message: 'DNS lookup failed',
+        message: userMessage,
         data: {
           domain: customDomain.domain,
           status: customDomain.status,
-          error: dnsError.message
+          error: detailedError,
+          instructions: customDomain.getDNSInstructions(),
+          troubleshooting: {
+            step1: 'Go to your domain registrar (GoDaddy, Namecheap, Cloudflare, etc.)',
+            step2: 'Add a TXT record with:',
+            step3: `Name/Host: _brandlink_verify.${customDomain.domain}`,
+            step4: `Value: ${customDomain.verificationToken}`,
+            step5: 'TTL: 3600 (or 1 hour)',
+            step6: 'Wait 5-10 minutes for DNS propagation',
+            step7: 'Click "Verify Domain" again'
+          }
         }
       });
     }
@@ -198,7 +309,8 @@ const verifyDomain = async (req, res) => {
     console.error('Verify domain error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to verify domain'
+      message: 'Failed to verify domain',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -265,6 +377,9 @@ const getDomainById = async (req, res) => {
       .select('destinationUrl shortId customName clicks')
       .lean();
 
+    const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+    const baseDomain = new URL(baseUrl).hostname;
+
     res.json({
       success: true,
       data: {
@@ -279,8 +394,8 @@ const getDomainById = async (req, res) => {
           },
           cname: {
             type: 'CNAME',
-            name: domain.domain,
-            value: `links.${process.env.BASE_URL ? new URL(process.env.BASE_URL).hostname : 'your-platform.com'}`,
+            name: '@',
+            value: `links.${baseDomain}`,
             ttl: 3600
           }
         },
@@ -341,15 +456,18 @@ const getBrandableUrls = async (req, res) => {
   try {
     // Get all user URLs
     const urls = await Url.find({ user: req.user._id })
-      .select('shortId destinationUrl customName clicks createdAt')
+      .select('shortId destinationUrl customName clicks createdAt brandedDomains')
       .sort({ createdAt: -1 })
       .lean();
 
-    // Filter URLs that aren't already branded (or get all for selection)
+    // Get base URL
+    const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+
+    // Format URLs for frontend
     const brandableUrls = urls.map(url => ({
       id: url._id,
       shortId: url.shortId,
-      shortUrl: `${process.env.BASE_URL || 'http://localhost:5000'}/s/${url.shortId}`,
+      shortUrl: url.customName ? `${baseUrl}/${url.customName}` : `${baseUrl}/${url.shortId}`,
       destinationUrl: url.destinationUrl,
       customName: url.customName,
       clicks: url.clicks,

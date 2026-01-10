@@ -10,7 +10,8 @@ const customDomainSchema = new mongoose.Schema({
     type: String,
     required: true,
     lowercase: true,
-    trim: true
+    trim: true,
+    unique: true
   },
   shortId: {
     type: String,
@@ -28,12 +29,13 @@ const customDomainSchema = new mongoose.Schema({
   },
   verificationToken: {
     type: String,
-    default: () => require('crypto').randomBytes(16).toString('hex')
+    default: function() {
+      return require('crypto').randomBytes(16).toString('hex');
+    }
   },
   dnsRecords: {
-    aRecord: String,
-    cnameRecord: String,
-    txtRecord: String
+    txtRecord: String,
+    cnameRecord: String
   },
   sslCertificate: {
     issued: { type: Boolean, default: false },
@@ -65,14 +67,9 @@ customDomainSchema.index({ user: 1 });
 customDomainSchema.index({ domain: 1 }, { unique: true });
 customDomainSchema.index({ brandedShortId: 1 }, { unique: true });
 customDomainSchema.index({ status: 1 });
-customDomainSchema.index({ 'dnsRecords.txtRecord': 1 });
 
-// Pre-save to ensure domain format
-customDomainSchema.pre('save', function(next) {
-  // Remove protocol and trailing slashes
-  this.domain = this.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
-  next();
-});
+// Remove the pre-save hook and handle domain cleaning in controller
+// This is the fix - no more pre-save hook with next() issues
 
 // Static method to generate branded short ID
 customDomainSchema.statics.generateBrandedShortId = function(domain, shortId) {
@@ -80,10 +77,21 @@ customDomainSchema.statics.generateBrandedShortId = function(domain, shortId) {
   return crypto.createHash('md5').update(`${domain}:${shortId}:${Date.now()}`).digest('hex').substring(0, 8);
 };
 
+// Static method to clean domain
+customDomainSchema.statics.cleanDomain = function(domain) {
+  if (!domain || typeof domain !== 'string') return domain;
+  return domain
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase()
+    .trim();
+};
+
 // Instance method to get DNS instructions
 customDomainSchema.methods.getDNSInstructions = function() {
-  const baseDomain = process.env.BASE_URL ? 
-    new URL(process.env.BASE_URL).hostname : 'your-platform.com';
+  const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+  const baseDomain = new URL(baseUrl).hostname;
   
   return {
     txt: {
@@ -94,14 +102,8 @@ customDomainSchema.methods.getDNSInstructions = function() {
     },
     cname: {
       type: 'CNAME',
-      name: this.domain,
+      name: '@',
       value: `links.${baseDomain}`,
-      ttl: 3600
-    },
-    a: {
-      type: 'A',
-      name: this.domain,
-      value: process.env.SERVER_IP || '52.6.84.124', // Your server IP
       ttl: 3600
     }
   };
