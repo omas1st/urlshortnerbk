@@ -322,7 +322,7 @@ const getOverallAnalytics = async (req, res) => {
             { $limit: 20 }
           ],
           
-          // Peak hours - NEW
+          // Peak hours - UPDATED
           peakHours: [
             {
               $group: {
@@ -516,11 +516,15 @@ const getOverallAnalytics = async (req, res) => {
     const referrerData = stats.referrers || [];
     const referrerCategories = categorizeReferrers(referrerData);
     
-    // NEW: Peak hour data
-    const peakHourDataFormatted = peakHourData.map(item => ({
-      hour: item.hour,
-      count: item.count
-    }));
+    // UPDATED: Peak hour data - format to include all 24 hours
+    const peakHourArray = stats.peakHours || [];
+    const peakHourDataFormatted = Array.from({ length: 24 }, (_, i) => {
+      const hourData = peakHourArray.find(h => h.hour === i);
+      return {
+        hour: i,
+        count: hourData ? hourData.count : 0
+      };
+    });
     
     // NEW: Top cities
     const cityData = stats.topCities || [];
@@ -599,7 +603,7 @@ const getOverallAnalytics = async (req, res) => {
         browserDistribution,
         osDistribution,
         referrerCategories,
-        peakHourData: peakHourDataFormatted,
+        peakHourData: peakHourDataFormatted, // UPDATED
         topCities,
         topLinks: filteredTopLinks
       }
@@ -793,7 +797,7 @@ const getUrlAnalytics = async (req, res) => {
             { $limit: 20 }
           ],
           
-          // Peak hours - NEW
+          // Peak hours - UPDATED
           peakHours: [
             {
               $group: {
@@ -964,12 +968,15 @@ const getUrlAnalytics = async (req, res) => {
     const referrerData = stats.referrers || [];
     const referrerCategories = categorizeReferrers(referrerData);
     
-    // NEW: Peak hour data
+    // UPDATED: Peak hour data - format to include all 24 hours
     const peakHourArray = stats.peakHours || [];
-    const peakHourDataFormatted = peakHourArray.map(item => ({
-      hour: item.hour,
-      count: item.count
-    }));
+    const peakHourDataFormatted = Array.from({ length: 24 }, (_, i) => {
+      const hourData = peakHourArray.find(h => h.hour === i);
+      return {
+        hour: i,
+        count: hourData ? hourData.count : 0
+      };
+    });
     
     // NEW: Top cities
     const cityData = stats.topCities || [];
@@ -1035,7 +1042,7 @@ const getUrlAnalytics = async (req, res) => {
         browserDistribution,
         osDistribution,
         referrerCategories,
-        peakHourData: peakHourDataFormatted,
+        peakHourData: peakHourDataFormatted, // UPDATED
         topCities,
         topLinks
       }
