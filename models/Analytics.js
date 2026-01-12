@@ -18,6 +18,11 @@ const analyticsSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  // Timezone field for analytics data
+  timezone: {
+    type: String,
+    default: 'UTC'
+  },
   // Click metrics
   clicks: {
     type: Number,
@@ -83,9 +88,11 @@ const analyticsSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // Time-based clicks with timezone support
   clicksByHour: [{
     hour: Number,
-    clicks: Number
+    clicks: Number,
+    timezone: String // Store timezone for each hour if needed
   }],
   // Referrer data
   referrers: [{
@@ -141,6 +148,7 @@ analyticsSchema.index({ urlId: 1, date: 1 });
 analyticsSchema.index({ userId: 1, date: 1 });
 analyticsSchema.index({ date: 1 });
 analyticsSchema.index({ 'countries.clicks': -1 });
+analyticsSchema.index({ timezone: 1 }); // Added index for timezone queries
 
 // Static methods
 analyticsSchema.statics.getUrlAnalytics = async function(urlId, startDate, endDate) {
@@ -164,7 +172,8 @@ analyticsSchema.statics.getUrlAnalytics = async function(urlId, startDate, endDa
         countries: { $push: '$countries' },
         devices: { $push: '$devices' },
         browsers: { $push: '$browsers' },
-        referrers: { $push: '$referrers' }
+        referrers: { $push: '$referrers' },
+        timezones: { $addToSet: '$timezone' } // Added timezones to aggregation
       }
     },
     {
@@ -207,7 +216,8 @@ analyticsSchema.statics.getUrlAnalytics = async function(urlId, startDate, endDa
           input: '$referrers',
           initialValue: [],
           in: { $concatArrays: ['$$value', '$$this'] }
-        }}
+        }},
+        timezones: 1 // Include timezones in the result
       }
     }
   ]);
@@ -226,7 +236,8 @@ analyticsSchema.statics.getUserAnalytics = async function(userId, startDate, end
         _id: '$urlId',
         clicks: { $sum: '$clicks' },
         uniqueClicks: { $sum: '$uniqueClicks' },
-        conversions: { $sum: '$conversions' }
+        conversions: { $sum: '$conversions' },
+        timezones: { $addToSet: '$timezone' } // Added timezones to grouping
       }
     },
     {
@@ -254,7 +265,8 @@ analyticsSchema.statics.getUserAnalytics = async function(userId, startDate, end
             0,
             { $multiply: [{ $divide: ['$conversions', '$clicks'] }, 100] }
           ]
-        }
+        },
+        timezones: 1 // Include timezones in the result
       }
     },
     {
@@ -277,7 +289,8 @@ analyticsSchema.statics.getSystemAnalytics = async function(startDate, endDate) 
         totalUniqueClicks: { $sum: '$uniqueClicks' },
         totalUrls: { $addToSet: '$urlId' },
         totalUsers: { $addToSet: '$userId' },
-        avgBounceRate: { $avg: '$bounceRate' }
+        avgBounceRate: { $avg: '$bounceRate' },
+        timezones: { $addToSet: '$timezone' } // Added timezones to aggregation
       }
     },
     {
@@ -287,7 +300,8 @@ analyticsSchema.statics.getSystemAnalytics = async function(startDate, endDate) 
         totalUniqueClicks: 1,
         totalUrls: { $size: '$totalUrls' },
         totalUsers: { $size: '$totalUsers' },
-        avgBounceRate: 1
+        avgBounceRate: 1,
+        timezones: 1 // Include timezones in the result
       }
     }
   ]);
@@ -297,13 +311,19 @@ analyticsSchema.statics.getSystemAnalytics = async function(startDate, endDate) 
     totalUniqueClicks: 0,
     totalUrls: 0,
     totalUsers: 0,
-    avgBounceRate: 0
+    avgBounceRate: 0,
+    timezones: ['UTC']
   };
 };
 
 // Instance method to update analytics
 analyticsSchema.methods.updateFromClick = function(clickData) {
   this.clicks += 1;
+  
+  // Update timezone if provided
+  if (clickData.timezone && !this.timezone) {
+    this.timezone = clickData.timezone;
+  }
   
   // Update unique clicks if IP is new
   // This would require checking against stored IPs
@@ -318,6 +338,22 @@ analyticsSchema.methods.updateFromClick = function(clickData) {
         country: clickData.country,
         clicks: 1,
         uniqueClicks: 1
+      });
+    }
+  }
+  
+  // Update city data
+  if (clickData.city) {
+    const cityIndex = this.cities.findIndex(c => 
+      c.city === clickData.city && c.country === clickData.country
+    );
+    if (cityIndex > -1) {
+      this.cities[cityIndex].clicks += 1;
+    } else {
+      this.cities.push({
+        city: clickData.city,
+        country: clickData.country || 'Unknown',
+        clicks: 1
       });
     }
   }
@@ -350,19 +386,29 @@ analyticsSchema.methods.updateFromClick = function(clickData) {
     }
   }
   
-  // Update hour data
+  // Update hour data with timezone
   const hour = new Date().getHours();
-  const hourIndex = this.clicksByHour.findIndex(h => h.hour === hour);
+  const timezone = clickData.timezone || this.timezone || 'UTC';
+  
+  // Find existing hour entry with the same timezone
+  const hourIndex = this.clicksByHour.findIndex(h => 
+    h.hour === hour && h.timezone === timezone
+  );
+  
   if (hourIndex > -1) {
     this.clicksByHour[hourIndex].clicks += 1;
   } else {
-    this.clicksByHour.push({ hour, clicks: 1 });
+    this.clicksByHour.push({ 
+      hour, 
+      clicks: 1,
+      timezone 
+    });
   }
   
-  // Update peak hour
+  // Update peak hour (considering all timezones)
   const maxHour = this.clicksByHour.reduce((max, h) => 
     h.clicks > max.clicks ? h : max, 
-    { hour: 0, clicks: 0 }
+    { hour: 0, clicks: 0, timezone: 'UTC' }
   );
   this.peakHour = maxHour.hour;
   
