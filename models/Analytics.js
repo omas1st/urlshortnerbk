@@ -15,8 +15,8 @@ const analyticsSchema = new mongoose.Schema({
   },
   date: {
     type: Date,
-    required: true,
-    index: true
+    required: true
+    // REMOVED: index: true - to avoid duplicate with schema.index({ date: 1 }) below
   },
   // Timezone field for analytics data
   timezone: {
@@ -146,8 +146,7 @@ const analyticsSchema = new mongoose.Schema({
 // Indexes for efficient querying
 analyticsSchema.index({ urlId: 1, date: 1 });
 analyticsSchema.index({ userId: 1, date: 1 });
-analyticsSchema.index({ date: 1 });
-analyticsSchema.index({ 'countries.clicks': -1 });
+analyticsSchema.index({ date: 1 }); // Keep this one (single field index for date)
 analyticsSchema.index({ timezone: 1 }); // Added index for timezone queries
 
 // Static methods

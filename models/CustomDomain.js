@@ -11,7 +11,7 @@ const customDomainSchema = new mongoose.Schema({
     required: true,
     lowercase: true,
     trim: true,
-    unique: true
+    unique: true  // This creates an index automatically
   },
   shortId: {
     type: String,
@@ -20,7 +20,7 @@ const customDomainSchema = new mongoose.Schema({
   brandedShortId: {
     type: String,
     required: true,
-    unique: true
+    unique: true  // This creates an index automatically
   },
   status: {
     type: String,
@@ -62,11 +62,14 @@ const customDomainSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes
+// Indexes - REMOVE THE DUPLICATE INDEXES FOR domain and brandedShortId
+// Since we already have 'unique: true' on those fields, they automatically create indexes
 customDomainSchema.index({ user: 1 });
-customDomainSchema.index({ domain: 1 }, { unique: true });
-customDomainSchema.index({ brandedShortId: 1 }, { unique: true });
 customDomainSchema.index({ status: 1 });
+
+// You can also add compound indexes if needed in the future:
+// customDomainSchema.index({ user: 1, status: 1 });
+// customDomainSchema.index({ user: 1, domain: 1 });
 
 // Remove the pre-save hook and handle domain cleaning in controller
 // This is the fix - no more pre-save hook with next() issues
