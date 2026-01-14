@@ -858,12 +858,17 @@ if (fs.existsSync(buildPath)) {
     res.sendFile(path.join(buildPath, 'index.html'));
   });
 } else {
+  // ROOT ROUTE - Redirect to frontend with automatic redirect
   app.get('/', (req, res) => {
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.send(`
       <!DOCTYPE html>
       <html>
         <head>
-          <title>URL Shortener API</title>
+          <title>URL Shortener Backend Server</title>
+          <meta name="description" content="This is the backend API server for the URL Shortener. Please visit the frontend for the web interface.">
+          <meta name="robots" content="noindex, nofollow">
+          <meta http-equiv="refresh" content="1; url=${frontendUrl}" />
           <style>
             body {
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -871,29 +876,136 @@ if (fs.existsSync(buildPath)) {
               margin: 0 auto;
               padding: 40px 20px;
               line-height: 1.6;
+              text-align: center;
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+              color: white;
+              min-height: 100vh;
+              display: flex;
+              flex-direction: column;
+              justify-content: center;
+              align-items: center;
             }
-            h1 { color: #333; }
-            .api-link {
-              background: #f5f5f5;
-              padding: 15px;
-              border-radius: 8px;
-              margin: 10px 0;
-              display: block;
+            .container {
+              background: rgba(255, 255, 255, 0.1);
+              backdrop-filter: blur(10px);
+              border-radius: 20px;
+              padding: 40px;
+              box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            }
+            h1 { 
+              color: white; 
+              font-size: 2.5rem;
+              margin-bottom: 20px;
+              text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+            }
+            .message {
+              font-size: 1.2rem;
+              margin: 20px 0;
+              opacity: 0.9;
+            }
+            .redirect-info {
+              background: rgba(255, 255, 255, 0.15);
+              padding: 20px;
+              border-radius: 10px;
+              margin: 30px 0;
+              border-left: 4px solid #00ff88;
+            }
+            .frontend-link {
+              display: inline-block;
+              background: white;
+              color: #667eea;
+              padding: 15px 30px;
+              border-radius: 50px;
               text-decoration: none;
-              color: #0066cc;
-              border-left: 4px solid #0066cc;
+              font-weight: bold;
+              margin-top: 20px;
+              transition: all 0.3s ease;
+              box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            }
+            .frontend-link:hover {
+              transform: translateY(-3px);
+              box-shadow: 0 15px 40px rgba(0, 0, 0, 0.3);
+            }
+            .countdown {
+              font-size: 1.5rem;
+              font-weight: bold;
+              margin-top: 20px;
+              color: #00ff88;
+            }
+            .api-links {
+              margin-top: 30px;
+              display: flex;
+              gap: 15px;
+              flex-wrap: wrap;
+              justify-content: center;
+            }
+            .api-link {
+              background: rgba(255, 255, 255, 0.1);
+              padding: 10px 20px;
+              border-radius: 8px;
+              text-decoration: none;
+              color: white;
+              border: 1px solid rgba(255, 255, 255, 0.2);
+              transition: all 0.3s ease;
             }
             .api-link:hover {
-              background: #e8e8e8;
+              background: rgba(255, 255, 255, 0.2);
+              border-color: rgba(255, 255, 255, 0.4);
+            }
+            .logo {
+              font-size: 3rem;
+              margin-bottom: 20px;
+            }
+            @keyframes pulse {
+              0% { transform: scale(1); }
+              50% { transform: scale(1.05); }
+              100% { transform: scale(1); }
+            }
+            .pulse {
+              animation: pulse 2s infinite;
             }
           </style>
+          <script>
+            let seconds = 1;
+            const countdownElement = document.getElementById('countdown');
+            
+            function updateCountdown() {
+              countdownElement.textContent = seconds;
+              if (seconds <= 0) {
+                return;
+              }
+              seconds--;
+              setTimeout(updateCountdown, 1000);
+            }
+            
+            document.addEventListener('DOMContentLoaded', function() {
+              updateCountdown();
+            });
+          </script>
         </head>
         <body>
-          <h1>🚀 URL Shortener API</h1>
-          <p>API server is running. Use the following endpoints:</p>
-          <a href="/api" class="api-link">GET /api - API Documentation</a>
-          <a href="/api/health" class="api-link">GET /api/health - Health Check</a>
-          <p>Frontend is not built. Run <code>npm run build</code> in the client directory.</p>
+          <div class="container">
+            <div class="logo">🔗</div>
+            <h1>URL Shortener Backend Server</h1>
+            
+            <div class="redirect-info">
+              <p class="message">This is the backend API server. For the web interface, please visit our frontend application.</p>
+              <p class="message">You will be automatically redirected in <span id="countdown" class="countdown">1</span> second...</p>
+            </div>
+            
+            <a href="${frontendUrl}" class="frontend-link pulse">
+              🚀 Go to Frontend Application
+            </a>
+            
+            <div class="api-links">
+              <a href="/api" class="api-link">📖 API Documentation</a>
+              <a href="/api/health" class="api-link">🩺 Health Check</a>
+            </div>
+            
+            <p style="margin-top: 30px; font-size: 0.9rem; opacity: 0.7;">
+              If you are not redirected automatically, click the link above.
+            </p>
+          </div>
         </body>
       </html>
     `);
