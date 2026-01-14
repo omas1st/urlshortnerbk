@@ -591,7 +591,130 @@ app.get('/:shortId', async (req, res, next) => {
       
       if (!password) {
         // Serve password entry page - Use the correct path without /s/
-        const passwordPage = `...`; // trimmed here for brevity in this snippet; full page is preserved in your copy
+        const passwordPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Password Protected URL</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 400px;
+            width: 100%;
+            text-align: center;
+        }
+        .lock-icon {
+            font-size: 48px;
+            margin-bottom: 20px;
+            color: #667eea;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .description {
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+        .password-form {
+            margin-bottom: 20px;
+        }
+        .password-input {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            box-sizing: border-box;
+            margin-bottom: 20px;
+            transition: border-color 0.3s;
+        }
+        .password-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .submit-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .submit-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        .error-message {
+            color: #ff4757;
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(255, 71, 87, 0.1);
+            border-radius: 5px;
+            display: ${req.query.error ? 'block' : 'none'};
+        }
+        .footer-note {
+            margin-top: 20px;
+            color: #999;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="lock-icon">🔒</div>
+        <h1>Password Required</h1>
+        <p class="description">This URL is password protected. Please enter the password to continue.</p>
+        
+        <form class="password-form" method="GET" action="/${shortId}">
+            <input type="password" 
+                   class="password-input" 
+                   name="password" 
+                   placeholder="Enter password" 
+                   required
+                   autocomplete="current-password"
+                   autofocus>
+            <button type="submit" class="submit-btn">Continue</button>
+        </form>
+        
+        <div class="error-message" id="errorMessage">
+            Incorrect password. Please try again.
+        </div>
+        
+        <p class="footer-note">This link is protected by the URL owner.</p>
+    </div>
+    
+    <script>
+        // Show error if present in URL
+        if (window.location.search.includes('error=1')) {
+            document.getElementById('errorMessage').style.display = 'block';
+        }
+        
+        // Focus on password field
+        document.querySelector('.password-input').focus();
+    </script>
+</body>
+</html>`;
         return res.send(passwordPage);
       }
       
@@ -709,7 +832,144 @@ app.get('/:shortId', async (req, res, next) => {
         const safeSplash = encodeURI(splashUrl);
         const safeRedirect = encodeURI(normalized);
 
-        const splashPage = `...`; // trimmed in snippet; full page preserved in your working file
+        const splashPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redirecting...</title>
+    <meta name="description" content="You are being redirected to the destination URL">
+    <meta http-equiv="refresh" content="5; url=${safeRedirect}">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 20px;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+        }
+        .splash-image {
+            max-width: 100%;
+            height: auto;
+            border-radius: 15px;
+            margin: 30px 0;
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.3);
+        }
+        .countdown {
+            font-size: 1.5rem;
+            margin: 20px 0;
+            color: #00ff88;
+            font-weight: bold;
+        }
+        .redirect-message {
+            font-size: 1.2rem;
+            margin: 20px 0;
+            opacity: 0.9;
+            line-height: 1.6;
+        }
+        .direct-link {
+            display: inline-block;
+            background: white;
+            color: #667eea;
+            padding: 15px 30px;
+            border-radius: 50px;
+            text-decoration: none;
+            font-weight: bold;
+            margin-top: 20px;
+            transition: all 0.3s ease;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+        .direct-link:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.3);
+        }
+        .sponsored-text {
+            margin-top: 30px;
+            font-size: 0.9rem;
+            opacity: 0.7;
+            font-style: italic;
+        }
+        .loader {
+            border: 5px solid rgba(255, 255, 255, 0.3);
+            border-top: 5px solid white;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 2s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔄 Redirecting...</h1>
+        
+        <div class="redirect-message">
+            You are being redirected to the destination URL.
+        </div>
+        
+        <div class="loader"></div>
+        
+        <div class="countdown" id="countdown">5</div>
+        
+        <p class="redirect-message">
+            You will be automatically redirected in <span id="seconds">5</span> seconds...
+        </p>
+        
+        <a href="${safeRedirect}" class="direct-link">
+            🚀 Click here if you are not redirected automatically
+        </a>
+        
+        <p class="sponsored-text">
+            This redirect page is brought to you by our URL shortener service.
+        </p>
+    </div>
+
+    <script>
+        let seconds = 5;
+        const countdownElement = document.getElementById('countdown');
+        const secondsElement = document.getElementById('seconds');
+        
+        function updateCountdown() {
+            seconds--;
+            countdownElement.textContent = seconds;
+            secondsElement.textContent = seconds;
+            if (seconds <= 0) {
+                return;
+            }
+            setTimeout(updateCountdown, 1000);
+        }
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            updateCountdown();
+        });
+    </script>
+</body>
+</html>`;
         return res.send(splashPage);
       }
     }
@@ -859,7 +1119,7 @@ if (fs.existsSync(buildPath)) {
     res.sendFile(path.join(buildPath, 'index.html'));
   });
 } else {
-  // ROOT ROUTE - Return informative page (NO meta-refresh, NO noindex)
+  // ROOT ROUTE - Redirect to frontend with automatic redirect
   app.get('/', (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.send(`
@@ -867,8 +1127,9 @@ if (fs.existsSync(buildPath)) {
       <html>
         <head>
           <title>URL Shortener Backend Server</title>
-          <meta charset="utf-8" />
           <meta name="description" content="This is the backend API server for the URL Shortener. Please visit the frontend for the web interface.">
+          <meta name="robots" content="noindex, nofollow">
+          <meta http-equiv="refresh" content="1; url=${frontendUrl}" />
           <style>
             body {
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -894,24 +1155,43 @@ if (fs.existsSync(buildPath)) {
             }
             h1 { 
               color: white; 
-              font-size: 2.2rem;
+              font-size: 2.5rem;
               margin-bottom: 20px;
               text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
             }
             .message {
-              font-size: 1.05rem;
+              font-size: 1.2rem;
               margin: 20px 0;
-              opacity: 0.95;
+              opacity: 0.9;
+            }
+            .redirect-info {
+              background: rgba(255, 255, 255, 0.15);
+              padding: 20px;
+              border-radius: 10px;
+              margin: 30px 0;
+              border-left: 4px solid #00ff88;
             }
             .frontend-link {
               display: inline-block;
               background: white;
               color: #667eea;
-              padding: 12px 22px;
-              border-radius: 40px;
+              padding: 15px 30px;
+              border-radius: 50px;
               text-decoration: none;
               font-weight: bold;
               margin-top: 20px;
+              transition: all 0.3s ease;
+              box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            }
+            .frontend-link:hover {
+              transform: translateY(-3px);
+              box-shadow: 0 15px 40px rgba(0, 0, 0, 0.3);
+            }
+            .countdown {
+              font-size: 1.5rem;
+              font-weight: bold;
+              margin-top: 20px;
+              color: #00ff88;
             }
             .api-links {
               margin-top: 30px;
@@ -922,25 +1202,70 @@ if (fs.existsSync(buildPath)) {
             }
             .api-link {
               background: rgba(255, 255, 255, 0.1);
-              padding: 8px 16px;
+              padding: 10px 20px;
               border-radius: 8px;
               text-decoration: none;
               color: white;
               border: 1px solid rgba(255, 255, 255, 0.2);
+              transition: all 0.3s ease;
+            }
+            .api-link:hover {
+              background: rgba(255, 255, 255, 0.2);
+              border-color: rgba(255, 255, 255, 0.4);
+            }
+            .logo {
+              font-size: 3rem;
+              margin-bottom: 20px;
+            }
+            @keyframes pulse {
+              0% { transform: scale(1); }
+              50% { transform: scale(1.05); }
+              100% { transform: scale(1); }
+            }
+            .pulse {
+              animation: pulse 2s infinite;
             }
           </style>
+          <script>
+            let seconds = 1;
+            const countdownElement = document.getElementById('countdown');
+            
+            function updateCountdown() {
+              countdownElement.textContent = seconds;
+              if (seconds <= 0) {
+                return;
+              }
+              seconds--;
+              setTimeout(updateCountdown, 1000);
+            }
+            
+            document.addEventListener('DOMContentLoaded', function() {
+              updateCountdown();
+            });
+          </script>
         </head>
         <body>
           <div class="container">
             <div class="logo">🔗</div>
-            <h1>URL Shortener Backend</h1>
-            <p class="message">This server is the backend API for your URL shortener. For the public frontend interface, use the link below.</p>
-            <a href="${frontendUrl}" class="frontend-link">Open Frontend Application</a>
-            <div class="api-links">
-              <a href="/api" class="api-link">API Info</a>
-              <a href="/api/health" class="api-link">Health</a>
+            <h1>URL Shortener Backend Server</h1>
+            
+            <div class="redirect-info">
+              <p class="message">This is the backend API server. For the web interface, please visit our frontend application.</p>
+              <p class="message">You will be automatically redirected in <span id="countdown" class="countdown">1</span> second...</p>
             </div>
-            <p style="margin-top: 24px; font-size: 0.9rem; opacity: 0.85;">This page intentionally does not redirect automatically and is safe for bots to crawl.</p>
+            
+            <a href="${frontendUrl}" class="frontend-link pulse">
+              🚀 Go to Frontend Application
+            </a>
+            
+            <div class="api-links">
+              <a href="/api" class="api-link">📖 API Documentation</a>
+              <a href="/api/health" class="api-link">🩺 Health Check</a>
+            </div>
+            
+            <p style="margin-top: 30px; font-size: 0.9rem; opacity: 0.7;">
+              If you are not redirected automatically, click the link above.
+            </p>
           </div>
         </body>
       </html>
