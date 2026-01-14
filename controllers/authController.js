@@ -1,4 +1,7 @@
 // controllers/authController.js
+const mongoose = require('mongoose');
+const connectDB = require('../config/database');
+
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const validator = require('validator');
@@ -28,11 +31,51 @@ const serverError = (res, err, ctx) => {
 };
 
 /**
+ * Ensure DB is connected before running queries
+ * Uses the cached connectDB() from config/database.js
+ * Includes a light retry (3 attempts) with exponential backoff for transient blips
+ */
+const ensureDbConnected = async () => {
+  // If already connected, return immediately
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    return;
+  }
+
+  const maxAttempts = 3; // total attempts
+  const baseDelayMs = 500; // initial wait before retry (multiplied by attempt)
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      // Await the shared connectDB() (it uses caching so it won't create duplicate connections)
+      await connectDB();
+      // connected successfully
+      return;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[authController] DB connect attempt ${attempt} failed:`, err && err.message ? err.message : err);
+      if (attempt < maxAttempts) {
+        const delay = baseDelayMs * attempt; // 500ms, 1000ms, ...
+        console.log(`[authController] Retrying DB connect in ${delay}ms (attempt ${attempt + 1}/${maxAttempts})`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  // After retries, throw so caller can return an appropriate error
+  throw lastErr || new Error('Unable to connect to database after retries');
+};
+
+/**
  * register
  * Body: { email, username, password, confirmPassword }
  */
 exports.register = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     const { email, username, password, confirmPassword } = req.body || {};
     console.info(`[INFO] 📝 Registration attempt - Email: ${email || '<none>'}, Username: ${username || '<none>'}`);
 
@@ -94,8 +137,6 @@ exports.register = async (req, res) => {
     // generate token
     const token = signToken({ userId: user._id, email: user.email, role: user.role });
 
-    // REMOVED email sending - automatically verify email
-
     // remove sensitive before returning
     user.password = undefined;
 
@@ -122,6 +163,8 @@ exports.register = async (req, res) => {
  */
 exports.login = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     const { emailOrUsername, password } = req.body || {};
     if (!emailOrUsername || !password) {
       return res.status(400).json({ success: false, message: 'Email/Username and password are required' });
@@ -242,6 +285,8 @@ exports.login = async (req, res) => {
  */
 exports.verifyIdentity = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     const { email, username } = req.body || {};
     
     if (!email || !username) {
@@ -294,6 +339,8 @@ exports.verifyIdentity = async (req, res) => {
  */
 exports.resetPasswordViaIdentity = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     const { email, username, newPassword, confirmPassword, verifyToken } = req.body || {};
     
     if (!email || !username || !newPassword || !confirmPassword) {
@@ -401,6 +448,8 @@ exports.resetPasswordViaIdentity = async (req, res) => {
  */
 exports.getCurrentUser = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     if (!req.user || !req.user._id) {
       return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
@@ -419,6 +468,8 @@ exports.getCurrentUser = async (req, res) => {
  */
 exports.updateProfile = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     if (!req.user || !req.user._id) {
       return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
@@ -477,6 +528,8 @@ exports.updateProfile = async (req, res) => {
  */
 exports.changePassword = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     if (!req.user || !req.user._id) {
       return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
@@ -515,6 +568,8 @@ exports.changePassword = async (req, res) => {
  */
 exports.forgotPassword = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     const { email } = req.body || {};
     if (!email) {
       return res.status(400).json({ success: false, message: 'Email is required' });
@@ -559,6 +614,8 @@ exports.forgotPassword = async (req, res) => {
  */
 exports.resetPassword = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     const { token, password, confirmPassword } = req.body || {};
     if (!token || !password || !confirmPassword) {
       return res.status(400).json({ success: false, message: 'All fields are required' });
@@ -591,6 +648,8 @@ exports.resetPassword = async (req, res) => {
  */
 exports.verifyEmail = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     const { token } = req.body || {};
     if (!token) {
       return res.status(400).json({ success: false, message: 'Verification token is required' });
@@ -629,6 +688,8 @@ exports.verifyEmail = async (req, res) => {
  */
 exports.resendVerification = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     if (!req.user || !req.user._id) {
       return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
@@ -669,6 +730,8 @@ exports.resendVerification = async (req, res) => {
  */
 exports.adminLogin = async (req, res) => {
   try {
+    await ensureDbConnected();
+
     const { username, password } = req.body || {};
     if (!username || !password) {
       return res.status(400).json({ success: false, message: 'Username and password are required' });
@@ -762,6 +825,7 @@ exports.adminLogin = async (req, res) => {
  */
 exports.logout = async (req, res) => {
   try {
+    await ensureDbConnected();
     // Invalidate token via blacklist in production; here we just return success
     return res.json({ success: true, message: 'Logged out successfully' });
   } catch (err) {
