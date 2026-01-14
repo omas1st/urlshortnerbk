@@ -17,6 +17,9 @@ const cookieParser = require('cookie-parser');
 // Import encryption service
 const encryptionService = require('./config/encryption');
 
+// Import DB connect helper (NEW)
+const connectDB = require('./config/database');
+
 dotenv.config();
 
 // Try to require geoip-lite if available (optional dependency)
@@ -29,7 +32,7 @@ try {
   geoip = null;
 }
 
- // Routes
+// Routes
 const authRoutes = require('./routes/authRoutes');
 const urlRoutes = require('./routes/urlRoutes');
 const analyticsRoutes = require('./routes/analyticsRoutes');
@@ -38,6 +41,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const helpRoutes = require('./routes/helpRoutes');
 const customDomainRoutes = require('./routes/customDomainRoutes');
 
+// Models (require before connectDB so syncIndexes in connectDB can run)
 const Url = require('./models/Url');
 const Click = require('./models/Click');
 
@@ -178,91 +182,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Database connection - SAFER INDEX SYNC (uses model.syncIndexes instead of raw collection.createIndexes)
-mongoose.connect(process.env.MONGO_URI)
-  .then(async () => {
-    console.log('✅ MongoDB connected successfully');
-
-    // Sync indexes for each registered model (safer than iterating raw collections)
-    try {
-      const modelNames = mongoose.modelNames();
-      if (modelNames.length === 0) {
-        console.log('No mongoose models registered yet; skipping index sync.');
-      } else {
-        for (const name of modelNames) {
-          try {
-            const model = mongoose.model(name);
-            const res = await model.syncIndexes();
-            console.log(`✅ Indexes synced for model "${name}":`, Array.isArray(res) ? `${res.length} ops` : JSON.stringify(res));
-          } catch (modelErr) {
-            console.error(`Error syncing indexes for model "${name}":`, modelErr && modelErr.message ? modelErr.message : modelErr);
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Index sync overall error:', err && err.message ? err.message : err);
-    }
-  })
-  .catch(err => {
-    console.error('❌ MongoDB connection error:', err.message);
-    console.log('Trying to connect without deprecated options...');
-    
-    // Try without any options
-    mongoose.connect(process.env.MONGO_URI, {
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 45000,
-    })
-    .then(async () => {
-      console.log('✅ MongoDB connected on second attempt');
-
-      // Attempt index sync on second attempt as well
-      try {
-        const modelNames = mongoose.modelNames();
-        for (const name of modelNames) {
-          try {
-            const model = mongoose.model(name);
-            const res = await model.syncIndexes();
-            console.log(`✅ Indexes synced for model "${name}":`, Array.isArray(res) ? `${res.length} ops` : JSON.stringify(res));
-          } catch (modelErr) {
-            console.error(`Error syncing indexes for model "${name}":`, modelErr && modelErr.message ? modelErr.message : modelErr);
-          }
-        }
-      } catch (err2) {
-        console.error('Index sync overall error (second attempt):', err2 && err2.message ? err2.message : err2);
-      }
-    })
-    .catch(err2 => console.error('❌ MongoDB second connection attempt failed:', err2.message));
-  });
-
-// Mongoose connection events
-mongoose.connection.on('error', err => {
-  console.error('MongoDB connection error:', err);
-});
-
-mongoose.connection.on('disconnected', () => {
-  console.log('MongoDB disconnected');
-});
-
-mongoose.connection.on('reconnected', () => {
-  console.log('MongoDB reconnected');
-});
-
-// Cron job for URL expiration
-cron.schedule('0 0 * * *', async () => {
-  try {
-    const expired = await Url.find({ 
-      expirationDate: { $lt: new Date() }, 
-      isActive: true 
-    });
-    for (const u of expired) {
-      u.isActive = false;
-      await u.save();
-      console.log(`Expired URL deactivated: ${u.shortId}`);
-    }
-  } catch (err) {
-    console.error('Cron error:', err);
-  }
-});
+/* 
+  NOTE: DB connection is handled by ./config/database.connectDB()
+  We will call it below and only start the server & schedule DB-dependent cron jobs after it resolves.
+*/
 
 // Helper to detect device type
 const detectDeviceType = (userAgent) => {
@@ -555,7 +478,7 @@ app.use(async (req, res, next) => {
   }
 });
 
-// SHORT URL REDIRECT ENDPOINT - IMPROVED VERSION
+// SHORT URL REDIRECT ENDPOINT - IMPROVED VERSION (from old server.js)
 app.get('/:shortId', async (req, res, next) => {
   try {
     const { shortId } = req.params;
@@ -565,7 +488,8 @@ app.get('/:shortId', async (req, res, next) => {
     console.log(`Headers host: ${req.headers.host}`);
     
     // Get list of known frontend routes from environment variable or default list
-    const frontendRoutes = (process.env.FRONTEND_ROUTES || 'login,register,dashboard,analytics,generated-urls,qr-codes,brand-link,settings').split(',');
+    // FIXED: include public pages so they are NOT treated as short IDs
+    const frontendRoutes = (process.env.FRONTEND_ROUTES || 'login,register,dashboard,analytics,generated-urls,qr-codes,brand-link,settings,about,privacy,terms,faq,contact').split(',').map(s => s.trim()).filter(Boolean);
     
     // Define backend paths that should be skipped
     const backendPaths = ['api', 'static', '_next', 'health', 'favicon.ico', 'sitemap.xml', 'robots.txt'];
@@ -634,7 +558,6 @@ app.get('/:shortId', async (req, res, next) => {
       isActive: url.isActive
     });
     
-    // Rest of your existing redirect logic continues...
     // Check if URL is active
     if (!url.isActive) {
       return res.status(403).json({ 
@@ -661,7 +584,7 @@ app.get('/:shortId', async (req, res, next) => {
       });
     }
     
-    // Handle password protection - Serve password page
+    // Handle password protection - Serve password page (from old server.js)
     if (url.password) {
       const password = req.query.password;
       
@@ -840,7 +763,6 @@ app.get('/:shortId', async (req, res, next) => {
       }
     }
     
-    // Continue with the rest of your redirect logic (destinations, affiliate, splash, etc.)
     // ---------- Compute final destination first (so splash meta-refresh uses correct URL) ----------
     let finalDestination = url.destinationUrl;
 
@@ -1318,7 +1240,9 @@ if (fs.existsSync(buildPath)) {
     res.sendFile(path.join(buildPath, 'index.html'));
   });
 } else {
+  // ROOT ROUTE - Redirect to frontend with automatic redirect
   app.get('/', (req, res) => {
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -1430,21 +1354,55 @@ const shutdown = () => {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
-  console.log(`🗄️  Database: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'}`);
-});
+/**
+ * Start server only after DB connection is established.
+ * This prevents Mongoose buffering operations (and timing out) because queries will only run
+ * after the connection is ready.
+ */
+(async () => {
+  try {
+    await connectDB();
+    // Schedule DB-dependent cron jobs after DB connect (moved here)
+    cron.schedule('0 0 * * *', async () => {
+      try {
+        const expired = await Url.find({ 
+          expirationDate: { $lt: new Date() }, 
+          isActive: true 
+        });
+        for (const u of expired) {
+          u.isActive = false;
+          await u.save();
+          console.log(`Expired URL deactivated: ${u.shortId}`);
+        }
+      } catch (err) {
+        console.error('Cron error:', err);
+      }
+    });
 
-// Handle server errors
-server.on('error', (error) => {
-  if (error.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use.`);
+    // Start the HTTP server now that DB is ready
+    const server = app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+      // Mask DB target for safer logs
+      const dbTarget = (process.env.MONGO_URI || process.env.MONGODB_URI || '').startsWith('mongodb://127.0.0.1') ? 'local mongodb (127.0.0.1)' : (process.env.MONGO_URI || process.env.MONGODB_URI) ? 'configured MongoDB URI' : 'no MongoDB env set';
+      console.log(`🗄️  Database: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'} (${dbTarget})`);
+    });
+
+    // Handle server errors
+    server.on('error', (error) => {
+      if (error.code === 'EADDRINUSE') {
+        console.error(`Port ${PORT} is already in use.`);
+        process.exit(1);
+      } else {
+        console.error('Server error:', error);
+      }
+    });
+  } catch (err) {
+    console.error('Failed to start server due to DB connection error:', err && err.message ? err.message : err);
+    // Optional: exit or retry based on your deployment strategy
     process.exit(1);
-  } else {
-    console.error('Server error:', error);
   }
-});
+})();
 
 module.exports = app;
