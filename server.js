@@ -1,4 +1,4 @@
-// server.js - UPDATED CORS CONFIGURATION
+// server.js - UPDATED: always-send CORS headers + improved preflight handling
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -50,61 +50,102 @@ const app = express();
 // Trust proxy so req.ip and x-forwarded-for behave when behind a proxy/load-balancer
 app.set('trust proxy', true);
 
-// UPDATED: Dynamic CORS configuration
+// -----------------------------------------------------------------------------
+// Dynamic CORS configuration
+// -----------------------------------------------------------------------------
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5000',
   'http://omsurl.com',
   'http://omsurl.xyz',
-  'https://omsurl.xyz',
-  'https://omsurl.com', // Your Vercel frontend URL
-  process.env.FRONTEND_URL // If you set this in environment variables
+  'https://omsurl.xyz', // primary production frontend origin
+  'https://www.omsurl.xyz', // if you use www
+  'https://omsurl.com',
+  'https://www.omsurl.com',
+  process.env.FRONTEND_URL // If you set this in environment variables (add exact origin)
 ].filter(Boolean);
 
-// UPDATED: CORS middleware with better error handling
+// Build a CORS options object for the `cors` package
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
+    // Allow requests with no origin (like mobile apps, curl, or server-to-server)
     if (!origin) return callback(null, true);
-    
-    // Check if the origin is in the allowed list
+
+    // exact match against allowedOrigins
     if (allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     }
-    
-    // Allow any Vercel preview deployment
+
+    // Allow Vercel preview deployments (adjust if this is too permissive)
     if (origin.includes('.vercel.app')) {
       return callback(null, true);
     }
-    
-    // Allow local network for development
+
+    // allow local network addresses for development
     if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
       return callback(null, true);
     }
-    
+
     console.warn(`CORS blocked for origin: ${origin}`);
     return callback(new Error('Not allowed by CORS'), false);
   },
-  credentials: true,
+  credentials: true, // allow cookies to be sent
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cookie', 'Accept', 'Origin'],
   exposedHeaders: ['Content-Length', 'Content-Type', 'Authorization'],
   maxAge: 86400 // 24 hours
 };
 
-// Use CORS for all normal requests
-app.use(cors(corsOptions));
-
-// Handle preflight requests WITHOUT registering a wildcard route (avoids path-to-regexp errors)
+// -----------------------------------------------------------------------------
+// IMPORTANT: Always-send CORS header middleware
+// This middleware sets CORS response headers for every request and short-circuits
+// OPTIONS preflight with a 204. It runs before other middleware so headers are
+// present even if a later middleware returns an error early.
+// -----------------------------------------------------------------------------
 app.use((req, res, next) => {
-  if (req.method === 'OPTIONS') {
-    // Create a fresh CORS middleware instance for this request
-    return cors(corsOptions)(req, res, next);
+  try {
+    const requestOrigin = req.headers.origin || '';
+
+    // Determine allowed origin to echo back (must be exact origin for credentials)
+    let originToAllow = 'null';
+
+    if (!requestOrigin) {
+      // No origin (curl or same-origin server requests) - allow same-origin
+      originToAllow = '*';
+    } else if (allowedOrigins.indexOf(requestOrigin) !== -1 || requestOrigin.includes('.vercel.app') || requestOrigin.includes('localhost') || requestOrigin.includes('127.0.0.1')) {
+      // Echo the exact request origin (required when using credentials)
+      originToAllow = requestOrigin;
+    } else {
+      // Not an allowed origin: leave originToAllow blank so browser will block
+      originToAllow = 'null';
+    }
+
+    // Set the headers explicitly
+    // NOTE: when using credentials: true, Access-Control-Allow-Origin must NOT be '*'
+    res.header('Access-Control-Allow-Origin', originToAllow);
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Cookie, Accept, Origin');
+    res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Authorization');
+
+    // If this is a preflight request, respond immediately
+    if (req.method === 'OPTIONS') {
+      // Short-circuit OPTIONS requests with 204 No Content
+      return res.status(204).send('');
+    }
+  } catch (err) {
+    // never crash on CORS header write failures
+    console.warn('CORS preflight middleware error:', err && err.message ? err.message : err);
   }
   next();
 });
 
-// parse cookies (for cookie-based auth)
+// Use the cors package as well (keeps behavior consistent and logs blocked origins)
+app.use(cors(corsOptions));
+
+// -----------------------------------------------------------------------------
+// Parse cookies and body
+// -----------------------------------------------------------------------------
 app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -130,23 +171,23 @@ function normalizeUrl(dest) {
       }
       return null; // Reject other protocols
     }
-    
+
     // If scheme-relative URL (//example.com)
     if (urlStr.startsWith('//')) {
       const urlObj = new URL('https:' + urlStr);
       return urlObj.toString();
     }
-    
+
     // If no scheme, try to add https://
     // Check if it looks like a domain
-    if (/^[a-zA-Z0-9][a-zA-Z0-9-]*(\.[a-zA-Z0-9-]+)+(\/[^\s]*)?$/.test(urlStr) || 
+    if (/^[a-zA-Z0-9][a-zA-Z0-9-]*(\.[a-zA-Z0-9-]+)+(\/[^\s]*)?$/.test(urlStr) ||
         /^localhost(\:[0-9]+)?(\/[^\s]*)?$/.test(urlStr)) {
-      
+
       // Add https:// if not present
       if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
         urlStr = 'https://' + urlStr;
       }
-      
+
       try {
         const urlObj = new URL(urlStr);
         return urlObj.toString();
@@ -165,7 +206,7 @@ function normalizeUrl(dest) {
         return null;
       }
     }
-    
+
     // Try to parse as URL anyway (might be IP address or localhost)
     try {
       const urlObj = new URL('https://' + urlStr);
@@ -174,7 +215,7 @@ function normalizeUrl(dest) {
       console.warn('Failed to parse URL after all attempts:', urlStr, finalErr.message);
       return null;
     }
-    
+
   } catch (error) {
     console.warn('URL normalization error for:', urlStr, error.message);
     return null;
@@ -189,10 +230,10 @@ app.use((req, res, next) => {
       const sanitizedBody = {};
       Object.keys(req.body).forEach(key => {
         if (typeof req.body[key] === 'string') {
-          sanitizedBody[key] = xss(req.body[key], { 
-            whiteList: {}, 
-            stripIgnoreTag: true, 
-            stripIgnoreTagBody: ['script'] 
+          sanitizedBody[key] = xss(req.body[key], {
+            whiteList: {},
+            stripIgnoreTag: true,
+            stripIgnoreTagBody: ['script']
           });
         } else {
           sanitizedBody[key] = req.body[key];
@@ -200,16 +241,16 @@ app.use((req, res, next) => {
       });
       req.body = mongoSanitize(sanitizedBody);
     }
-    
+
     // Sanitize query params
     if (req.query && typeof req.query === 'object') {
       const sanitizedQuery = {};
       Object.keys(req.query).forEach(key => {
         if (typeof req.query[key] === 'string') {
-          sanitizedQuery[key] = xss(req.query[key], { 
-            whiteList: {}, 
-            stripIgnoreTag: true, 
-            stripIgnoreTagBody: ['script'] 
+          sanitizedQuery[key] = xss(req.query[key], {
+            whiteList: {},
+            stripIgnoreTag: true,
+            stripIgnoreTagBody: ['script']
           });
         } else {
           sanitizedQuery[key] = req.query[key];
@@ -231,7 +272,7 @@ app.use((req, res, next) => {
 // Helper to detect device type
 const detectDeviceType = (userAgent) => {
   if (!userAgent) return 'desktop';
-  
+
   const ua = UA(userAgent);
   if (ua.device.type === 'mobile') return 'mobile';
   if (ua.device.type === 'tablet') return 'tablet';
@@ -278,7 +319,7 @@ const simpleEncryptionService = {
     // Note: This is only for existing passwords that were created with base64
     return Buffer.from(password).toString('base64');
   },
-  
+
   decryptUrlPassword: (encryptedPassword) => {
     if (!encryptedPassword) return null;
     try {
@@ -377,9 +418,9 @@ function getVisitorValueForRule(ruleType, userAgent, ip, uaParser) {
 // Helper: check if visitor matches a rule
 function visitorMatchesRule(ruleType, ruleValue, userAgent, ip, uaParser) {
   const visitorValue = getVisitorValueForRule(ruleType, userAgent, ip, uaParser);
-  
+
   if (!visitorValue || !ruleValue) return false;
-  
+
   switch(ruleType) {
     case 'time': {
       // Handle time range format like "09-17"
@@ -387,9 +428,9 @@ function visitorMatchesRule(ruleType, ruleValue, userAgent, ip, uaParser) {
       const currentHour = new Date().getHours();
       const startHour = parseInt(startStr, 10);
       const endHour = parseInt(endStr, 10);
-      
+
       if (isNaN(startHour) || isNaN(endHour)) return false;
-      
+
       if (startHour <= endHour) {
         // Normal range (e.g., 09-17)
         return currentHour >= startHour && currentHour <= endHour;
@@ -422,59 +463,59 @@ const handleCustomDomainRedirect = async (req, res) => {
   try {
     const host = req.headers.host;
     const path = req.path.substring(1); // Remove leading slash
-    
+
     // Skip if it's our own domain
     const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
     const baseHost = new URL(baseUrl).hostname;
-    
+
     if (host === baseHost || host.includes('localhost')) {
       return false; // Let normal redirect handle it
     }
-    
+
     // Look up custom domain
     const CustomDomain = require('./models/CustomDomain');
-    const customDomain = await CustomDomain.findOne({ 
+    const customDomain = await CustomDomain.findOne({
       domain: host,
       status: 'active'
     });
-    
+
     if (!customDomain) {
       return false;
     }
-    
+
     // If path matches branded short ID
     if (path === customDomain.brandedShortId || path === '') {
       // Find the original URL
       const Url = require('./models/Url');
       const url = await Url.findOne({ shortId: customDomain.shortId });
-      
+
       if (!url) {
         return res.status(404).json({ success: false, message: 'URL not found' });
       }
-      
+
       // Check if URL is active
       if (!url.isActive) {
         return res.status(403).json({ success: false, message: 'URL is inactive' });
       }
-      
+
       // Handle expiration
       if (url.expirationDate && new Date() > new Date(url.expirationDate)) {
         url.isActive = false;
         await url.save();
         return res.status(410).json({ success: false, message: 'URL has expired' });
       }
-      
+
       // Increment clicks
       url.clicks = (url.clicks || 0) + 1;
       url.lastClicked = new Date();
       await url.save();
-      
+
       // Record click with custom domain info
       const Click = require('./models/Click');
       const userAgent = req.headers['user-agent'] || '';
       const ip = req.ip || req.headers['x-forwarded-for'] || 'Unknown';
       const uaParser = UA(userAgent);
-      
+
       const clickData = {
         urlId: url._id,
         ipAddress: ip,
@@ -487,14 +528,14 @@ const handleCustomDomainRedirect = async (req, res) => {
         customDomain: customDomain.domain,
         isBranded: true
       };
-      
+
       const click = new Click(clickData);
       await click.save();
-      
+
       // Redirect to destination
       return res.redirect(302, url.destinationUrl);
     }
-    
+
     return false;
   } catch (error) {
     console.error('Custom domain redirect error:', error);
@@ -505,13 +546,13 @@ const handleCustomDomainRedirect = async (req, res) => {
 // Add middleware to check custom domains before normal redirects - UPDATED VERSION
 app.use(async (req, res, next) => {
   // Skip API routes and known static paths
-  if (req.path.startsWith('/api') || 
+  if (req.path.startsWith('/api') ||
       req.path.startsWith('/static') ||
       req.path.startsWith('/_next') ||
       req.path.includes('.')) {  // Skip files with extensions
     return next();
   }
-  
+
   // Handle custom domain redirect
   const handled = await handleCustomDomainRedirect(req, res);
   if (!handled) {
@@ -523,61 +564,61 @@ app.use(async (req, res, next) => {
 app.get('/:shortId', async (req, res, next) => {
   try {
     const { shortId } = req.params;
-    
+
     console.log(`\n=== Redirect endpoint called for shortId: ${shortId} ===`);
     console.log(`Full path: ${req.path}`);
     console.log(`Headers host: ${req.headers.host}`);
-    
+
     // Get list of known frontend routes from environment variable or default list
     // FIXED: include public pages so they are NOT treated as short IDs
     const frontendRoutes = (process.env.FRONTEND_ROUTES || 'login,register,dashboard,analytics,generated-urls,qr-codes,brand-link,settings,about,privacy,terms,faq,contact').split(',').map(s => s.trim()).filter(Boolean);
-    
+
     // Define backend paths that should be skipped
     const backendPaths = ['api', 'static', '_next', 'health', 'favicon.ico', 'sitemap.xml', 'robots.txt'];
-    
+
     // Check if this is a known frontend route
     const isFrontendRoute = frontendRoutes.includes(shortId);
-    
+
     // Check if this is a backend path
     const isBackendPath = backendPaths.some(path => shortId.startsWith(path));
-    
+
     // Check if it looks like a file (has extension)
     const isFile = shortId.includes('.') && !shortId.includes('/');
-    
+
     // If it's a frontend route, backend path, or file, pass to next middleware
     if (isFrontendRoute || isBackendPath || isFile) {
       console.log(`Skipping ${shortId} because it's a ${isFrontendRoute ? 'frontend route' : isBackendPath ? 'backend path' : 'file'}`);
       return next();
     }
-    
+
     console.log(`Processing ${shortId} as potential short URL`);
-    
+
     if (!shortId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Short URL ID is required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Short URL ID is required'
       });
     }
-    
+
     // Find the URL - check both shortId and customName
-    const url = await Url.findOne({ 
+    const url = await Url.findOne({
       $or: [
         { shortId: shortId },
         { customName: shortId }
       ]
     });
-    
+
     if (!url) {
       console.log(`URL not found for ${shortId}, passing to frontend`);
-      
+
       // Check if it's a custom domain URL
       try {
         const CustomDomain = require('./models/CustomDomain');
-        const customUrl = await CustomDomain.findOne({ 
+        const customUrl = await CustomDomain.findOne({
           brandedShortId: shortId,
           status: 'active'
         });
-        
+
         if (customUrl) {
           const originalUrl = await Url.findOne({ shortId: customUrl.shortId });
           if (originalUrl) {
@@ -587,48 +628,48 @@ app.get('/:shortId', async (req, res, next) => {
       } catch (customErr) {
         console.warn('Custom domain check failed:', customErr.message);
       }
-      
+
       // Not found, let React handle it (will show 404)
       return next();
     }
-    
+
     console.log(`Found URL for ${shortId}:`, {
       shortId: url.shortId,
       customName: url.customName,
       destination: url.destinationUrl,
       isActive: url.isActive
     });
-    
+
     // Check if URL is active
     if (!url.isActive) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'This URL is currently inactive' 
+      return res.status(403).json({
+        success: false,
+        message: 'This URL is currently inactive'
       });
     }
-    
+
     // Check if URL is restricted
     if (url.isRestricted) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'This URL has been restricted' 
+      return res.status(403).json({
+        success: false,
+        message: 'This URL has been restricted'
       });
     }
-    
+
     // Check expiration date
     if (url.expirationDate && new Date() > new Date(url.expirationDate)) {
       url.isActive = false;
       await url.save();
-      return res.status(410).json({ 
-        success: false, 
-        message: 'This URL has expired' 
+      return res.status(410).json({
+        success: false,
+        message: 'This URL has expired'
       });
     }
-    
+
     // Handle password protection - Serve password page (from old server.js)
     if (url.password) {
       const password = req.query.password;
-      
+
       if (!password) {
         // Serve password entry page - Use the correct path without /s/
         const passwordPage = `
@@ -728,37 +769,37 @@ app.get('/:shortId', async (req, res, next) => {
                 <div class="lock-icon">🔒</div>
                 <h1>Password Required</h1>
                 <p>This link is password protected. Please enter the password to continue.</p>
-                
+
                 <form class="password-form" action="/${shortId}" method="GET">
-                  <input type="password" 
-                         name="password" 
-                         class="password-input" 
-                         placeholder="Enter password" 
+                  <input type="password"
+                         name="password"
+                         class="password-input"
+                         placeholder="Enter password"
                          required
                          autocomplete="current-password"
                          autofocus>
                   <button type="submit" class="submit-btn">Continue to Link</button>
                 </form>
-                
+
                 <div class="error-message" id="errorMessage">
                   Incorrect password. Please try again.
                 </div>
-                
+
                 <div class="footer">
                   This link is protected for security reasons.
                 </div>
               </div>
-              
+
               <script>
                 // Auto-focus on password input
                 document.querySelector('.password-input').focus();
-                
+
                 // Show error if present in URL
                 const urlParams = new URLSearchParams(window.location.search);
                 if (urlParams.get('error') === '1') {
                   document.getElementById('errorMessage').style.display = 'block';
                 }
-                
+
                 // Form submission with validation
                 document.querySelector('.password-form').addEventListener('submit', function(e) {
                   const password = document.querySelector('.password-input').value;
@@ -773,10 +814,10 @@ app.get('/:shortId', async (req, res, next) => {
         `;
         return res.send(passwordPage);
       }
-      
+
       // FIXED PASSWORD VERIFICATION
       let decryptedPassword = null;
-      
+
       try {
         // First try AES decryption (current method)
         decryptedPassword = encryptionService.decryptUrlPassword(url.password);
@@ -790,20 +831,20 @@ app.get('/:shortId', async (req, res, next) => {
           decryptedPassword = null;
         }
       }
-      
+
       // Check if we got a valid decrypted password
       if (!decryptedPassword) {
         console.error('Could not decrypt password for URL:', shortId);
         return res.redirect(`/${shortId}?error=1`);
       }
-      
+
       // Compare passwords
       if (password !== decryptedPassword) {
         console.log('Password mismatch for URL:', shortId);
         return res.redirect(`/${shortId}?error=1`);
       }
     }
-    
+
     // ---------- Compute final destination first (so splash meta-refresh uses correct URL) ----------
     let finalDestination = url.destinationUrl;
 
@@ -812,10 +853,10 @@ app.get('/:shortId', async (req, res, next) => {
       const userAgent = req.headers['user-agent'] || '';
       const ip = req.ip || req.headers['x-forwarded-for'] || (req.connection && req.connection.remoteAddress) || 'Unknown';
       const uaParser = UA(userAgent);
-      
+
       console.log(`\n=== Multiple destinations check for ${shortId} ===`);
       console.log(`Total destinations in DB: ${url.destinations.length}`);
-      
+
       // Log all destinations for debugging
       url.destinations.forEach((dest, index) => {
         console.log(`Destination ${index + 1}:`, {
@@ -826,17 +867,17 @@ app.get('/:shortId', async (req, res, next) => {
           urlType: typeof dest.url
         });
       });
-      
+
       // Parse destinations to extract rule type and value
       const parsedDestinations = url.destinations.map(dest => {
         if (!dest || !dest.rule || !dest.url) {
           console.log(`Skipping invalid destination:`, dest);
           return null;
         }
-        
+
         const [ruleType, ...ruleValueParts] = dest.rule.split(':');
         const ruleValue = ruleValueParts.join(':').trim();
-        
+
         // Create new object with ALL original properties
         const parsedDest = {
           url: dest.url, // Explicitly preserve the URL
@@ -846,33 +887,33 @@ app.get('/:shortId', async (req, res, next) => {
           parsedRuleType: ruleType ? ruleType.toLowerCase() : '',
           parsedRuleValue: ruleValue ? ruleValue.toLowerCase() : ''
         };
-        
+
         console.log(`Parsed destination ${dest.url}:`, {
           originalUrl: dest.url,
           parsedRuleType: parsedDest.parsedRuleType,
           parsedRuleValue: parsedDest.parsedRuleValue
         });
-        
+
         return parsedDest;
       }).filter(Boolean);
-      
+
       console.log(`Valid parsed destinations: ${parsedDestinations.length}`);
-      
+
       if (parsedDestinations.length > 0) {
         // First, find destinations that match the visitor
         const matchingDestinations = parsedDestinations.filter(dest => {
           const matches = visitorMatchesRule(
-            dest.parsedRuleType, 
-            dest.parsedRuleValue, 
-            userAgent, 
-            ip, 
+            dest.parsedRuleType,
+            dest.parsedRuleValue,
+            userAgent,
+            ip,
             uaParser
           );
-          
+
           console.log(`Checking rule ${dest.parsedRuleType}:${dest.parsedRuleValue} for ${dest.url} -> ${matches}`);
           return matches;
         });
-        
+
         console.log(`\nVisitor details:`);
         console.log(`- User Agent: ${userAgent.substring(0, 100)}...`);
         console.log(`- IP: ${ip}`);
@@ -881,12 +922,12 @@ app.get('/:shortId', async (req, res, next) => {
         console.log(`- Browser: ${uaParser.browser.name || 'Unknown'}`);
         console.log(`- OS: ${uaParser.os.name || 'Unknown'}`);
         console.log(`- Current hour: ${new Date().getHours()}`);
-        
+
         console.log(`\nMatching destinations found: ${matchingDestinations.length}`);
         matchingDestinations.forEach((dest, index) => {
           console.log(`Match ${index + 1}: ${dest.url} (rule: ${dest.parsedRuleType}:${dest.parsedRuleValue})`);
         });
-        
+
         if (matchingDestinations.length === 1) {
           // Only one match, use it
           const matchedDest = matchingDestinations[0];
@@ -912,7 +953,7 @@ app.get('/:shortId', async (req, res, next) => {
         console.log('No valid parsed destinations found. Using original URL.');
         finalDestination = url.destinationUrl;
       }
-      
+
       console.log(`\nFinal destination selected: ${finalDestination}`);
     } else {
       console.log(`No multiple destinations configured for ${shortId}. Using original URL.`);
@@ -921,11 +962,11 @@ app.get('/:shortId', async (req, res, next) => {
     // Ensure finalDestination is an absolute http(s) URL
     console.log(`\nNormalizing URL: "${finalDestination}"`);
     let normalized = normalizeUrl(finalDestination);
-    
+
     if (!normalized) {
       console.error('Invalid or unsupported destination URL stored for shortId', shortId, '->', finalDestination);
       console.error('Type of finalDestination:', typeof finalDestination);
-      
+
       // Try to get the original destination URL as fallback
       const fallbackNormalized = normalizeUrl(url.destinationUrl);
       if (fallbackNormalized) {
@@ -1016,7 +1057,7 @@ app.get('/:shortId', async (req, res, next) => {
           const userAgent = req.headers['user-agent'] || '';
           const uaParser = UA(userAgent);
           const ip = req.ip || req.headers['x-forwarded-for'] || (req.connection && req.connection.remoteAddress) || 'Unknown';
-          
+
           const clickData = {
             urlId: url._id,
             ipAddress: ip,
@@ -1032,7 +1073,7 @@ app.get('/:shortId', async (req, res, next) => {
             deviceModel: uaParser.device.model || 'Unknown',
             deviceVendor: uaParser.device.vendor || 'Unknown'
           };
-          
+
           const click = new Click(clickData);
           await click.save();
         } catch (clickError) {
@@ -1133,19 +1174,19 @@ app.get('/:shortId', async (req, res, next) => {
       }
       // If splash exists but can't resolve to a string URL, fall through to normal redirect behavior
     }
-    
+
     // If no splash OR splash couldn't be resolved, continue to increment clicks, record, then redirect
     // Increment click count
     url.clicks = (url.clicks || 0) + 1;
     url.lastClicked = new Date();
     await url.save();
-    
+
     // Record detailed click data
     try {
       const userAgent = req.headers['user-agent'] || '';
       const uaParser = UA(userAgent);
       const ip = req.ip || req.headers['x-forwarded-for'] || (req.connection && req.connection.remoteAddress) || 'Unknown';
-      
+
       const clickData = {
         urlId: url._id,
         ipAddress: ip,
@@ -1161,23 +1202,23 @@ app.get('/:shortId', async (req, res, next) => {
         deviceModel: uaParser.device.model || 'Unknown',
         deviceVendor: uaParser.device.vendor || 'Unknown'
       };
-      
+
       const click = new Click(clickData);
       await click.save();
     } catch (clickError) {
       console.error('Failed to record click (non-fatal):', clickError && clickError.message ? clickError.message : clickError);
       // Don't fail the redirect if click recording fails
     }
-    
+
     // Redirect to final destination (normalized)
     console.log(`\n=== Final redirect ===`);
     console.log(`Redirecting shortId=${shortId} -> ${normalized}\n`);
     return res.redirect(302, normalized);
-    
+
   } catch (error) {
     console.error('Short URL redirect error:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: 'Internal server error',
       ...(process.env.NODE_ENV === 'development' && { error: error.message })
     });
@@ -1236,31 +1277,31 @@ app.use('/api', (req, res, next) => {
     '/',
     '/api'
   ];
-  
+
   const isPublicRoute = publicRoutes.some(route => req.path.startsWith(route));
-  
+
   if (isPublicRoute) {
     return next();
   }
-  
+
   // Accept token either in Authorization header OR HttpOnly cookie (token or authToken)
   const authHeader = req.headers.authorization;
   const cookieToken = req.cookies?.token || req.cookies?.authToken;
-  
+
   let token;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.replace('Bearer ', '').trim();
   } else if (cookieToken) {
     token = cookieToken;
   }
-  
+
   if (!token) {
     return res.status(401).json({
       success: false,
       message: 'Access denied. No token provided.'
     });
   }
-  
+
   // Attach token to req for downstream middlewares/controllers if they want it
   req.token = token;
   next();
@@ -1386,7 +1427,7 @@ const shutdown = () => {
     console.log('MongoDB connection closed.');
     process.exit(0);
   });
-  
+
   // Force shutdown after 10 seconds
   setTimeout(() => {
     console.error('Could not close connections in time, forcefully shutting down');
@@ -1408,9 +1449,9 @@ process.on('SIGINT', shutdown);
     // Schedule DB-dependent cron jobs after DB connect (moved here)
     cron.schedule('0 0 * * *', async () => {
       try {
-        const expired = await Url.find({ 
-          expirationDate: { $lt: new Date() }, 
-          isActive: true 
+        const expired = await Url.find({
+          expirationDate: { $lt: new Date() },
+          isActive: true
         });
         for (const u of expired) {
           u.isActive = false;
