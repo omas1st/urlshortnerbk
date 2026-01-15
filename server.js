@@ -1,4 +1,4 @@
-// server.js - FIXED: Redirect to original URL when no matching rule found
+// server.js - UPDATED CORS CONFIGURATION
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -50,19 +50,60 @@ const app = express();
 // Trust proxy so req.ip and x-forwarded-for behave when behind a proxy/load-balancer
 app.set('trust proxy', true);
 
-// Middleware
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false,
-  crossOriginResourcePolicy: { policy: "cross-origin" }
-}));
-app.use(compression());
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+// UPDATED: Dynamic CORS configuration
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://omsurl.com',
+  'http://omsurl.xyz',
+  'https://omsurl.xyz',
+  'https://omsurl.com', // Your Vercel frontend URL
+  process.env.FRONTEND_URL // If you set this in environment variables
+].filter(Boolean);
+
+// UPDATED: CORS middleware with better error handling
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Check if the origin is in the allowed list
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    
+    // Allow any Vercel preview deployment
+    if (origin.includes('.vercel.app')) {
+      return callback(null, true);
+    }
+    
+    // Allow local network for development
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+    
+    console.warn(`CORS blocked for origin: ${origin}`);
+    return callback(new Error('Not allowed by CORS'), false);
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cookie'],
-}));
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cookie', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Length', 'Content-Type', 'Authorization'],
+  maxAge: 86400 // 24 hours
+};
+
+// Use CORS for all normal requests
+app.use(cors(corsOptions));
+
+// Handle preflight requests WITHOUT registering a wildcard route (avoids path-to-regexp errors)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    // Create a fresh CORS middleware instance for this request
+    return cors(corsOptions)(req, res, next);
+  }
+  next();
+});
+
 // parse cookies (for cookie-based auth)
 app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
@@ -1188,6 +1229,8 @@ app.use('/api', (req, res, next) => {
     '/api/auth/register',
     '/api/auth/forgot-password',
     '/api/auth/reset-password',
+    '/api/auth/verify-identity',
+    '/api/auth/reset-password-via-identity',
     '/api/health',
     '/health',
     '/',
@@ -1384,6 +1427,7 @@ process.on('SIGINT', shutdown);
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+      console.log(`🔧 Allowed CORS Origins: ${JSON.stringify(allowedOrigins)}`);
       // Mask DB target for safer logs
       const dbTarget = (process.env.MONGO_URI || process.env.MONGODB_URI || '').startsWith('mongodb://127.0.0.1') ? 'local mongodb (127.0.0.1)' : (process.env.MONGO_URI || process.env.MONGODB_URI) ? 'configured MongoDB URI' : 'no MongoDB env set';
       console.log(`🗄️  Database: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'} (${dbTarget})`);
