@@ -53,17 +53,22 @@ app.set('trust proxy', true);
 // -----------------------------------------------------------------------------
 // Dynamic CORS configuration
 // -----------------------------------------------------------------------------
+// Build allowed origins list: env ALLOWED_ORIGINS (comma-separated) + hardcoded + FRONTEND_URL
+const envList = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:5000',
-  'http://omsurl.com',
-  'http://omsurl.xyz',
-  'https://omsurl.xyz', // primary production frontend origin
-  'https://www.omsurl.xyz', // if you use www
-  'https://omsurl.com',
-  'https://www.omsurl.com',
-  process.env.FRONTEND_URL // If you set this in environment variables (add exact origin)
-].filter(Boolean);
+  ...new Set([
+    'http://localhost:3000',
+    'http://localhost:5000',
+    'http://omsurl.com',
+    'http://omsurl.xyz',
+    'https://omsurl.xyz', // primary production frontend origin
+    'https://www.omsurl.xyz', // if you use www
+    'https://omsurl.com',
+    'https://www.omsurl.com',
+    process.env.FRONTEND_URL, // If you set this in environment variables (add exact origin)
+    ...envList
+  ].filter(Boolean))
+];
 
 // Build a CORS options object for the `cors` package
 const corsOptions = {
@@ -107,22 +112,34 @@ app.use((req, res, next) => {
     const requestOrigin = req.headers.origin || '';
 
     // Determine allowed origin to echo back (must be exact origin for credentials)
-    let originToAllow = 'null';
+    let originToAllow = '';
 
     if (!requestOrigin) {
-      // No origin (curl or same-origin server requests) - allow same-origin
+      // No origin (curl or same-origin server requests) - allow wildcard (non-browser contexts)
       originToAllow = '*';
-    } else if (allowedOrigins.indexOf(requestOrigin) !== -1 || requestOrigin.includes('.vercel.app') || requestOrigin.includes('localhost') || requestOrigin.includes('127.0.0.1')) {
+    } else if (
+      allowedOrigins.indexOf(requestOrigin) !== -1 ||
+      requestOrigin.includes('.vercel.app') ||
+      requestOrigin.includes('localhost') ||
+      requestOrigin.includes('127.0.0.1')
+    ) {
       // Echo the exact request origin (required when using credentials)
       originToAllow = requestOrigin;
     } else {
-      // Not an allowed origin: leave originToAllow blank so browser will block
+      // Not an allowed origin: set origin to null so browser will block it
       originToAllow = 'null';
     }
 
     // Set the headers explicitly
     // NOTE: when using credentials: true, Access-Control-Allow-Origin must NOT be '*'
-    res.header('Access-Control-Allow-Origin', originToAllow);
+    if (originToAllow === '*') {
+      res.header('Access-Control-Allow-Origin', '*');
+    } else {
+      res.header('Access-Control-Allow-Origin', originToAllow);
+      // ensure caches differentiate responses by origin
+      res.header('Vary', 'Origin');
+    }
+
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Cookie, Accept, Origin');
@@ -142,6 +159,9 @@ app.use((req, res, next) => {
 
 // Use the cors package as well (keeps behavior consistent and logs blocked origins)
 app.use(cors(corsOptions));
+// NOTE: removed app.options('*', cors(corsOptions)); because Express/path-to-regexp
+// may throw on certain environments when using a raw '*' here. The preflight is
+// already handled above, so explicit app.options('*', ...) is unnecessary.
 
 // -----------------------------------------------------------------------------
 // Parse cookies and body
@@ -1265,20 +1285,29 @@ app.get(['/api', '/api/'], (req, res) => {
 // Authentication middleware for API routes
 app.use('/api', (req, res, next) => {
   // Skip authentication for public routes
+  // NOTE: middleware is mounted at /api, so req.path is e.g. '/auth/login'
+  // Use req.originalUrl to be robust for either form.
   const publicRoutes = [
-    '/api/auth/login',
-    '/api/auth/register',
-    '/api/auth/forgot-password',
-    '/api/auth/reset-password',
-    '/api/auth/verify-identity',
-    '/api/auth/reset-password-via-identity',
-    '/api/health',
+    '/auth/login',
+    '/auth/register',
+    '/auth/forgot-password',
+    '/auth/reset-password',
+    '/auth/verify-identity',
+    '/auth/reset-password-via-identity',
+    '/auth/resend-verification',
+    '/auth/verify-email',
+    '/auth/logout',
     '/health',
+    '/api/health',
     '/',
     '/api'
   ];
 
-  const isPublicRoute = publicRoutes.some(route => req.path.startsWith(route));
+  const original = req.originalUrl || '';
+  const isPublicRoute = publicRoutes.some(route => {
+    // Match both '/auth/...' and '/api/auth/...' forms
+    return original.startsWith(route) || original.startsWith('/api' + route);
+  });
 
   if (isPublicRoute) {
     return next();
