@@ -31,6 +31,63 @@ const serverError = (res, err, ctx) => {
 };
 
 /**
+ * Cookie helpers
+ *
+ * - By default the controller will set an httpOnly cookie named 'token' when issuing tokens.
+ * - You can disable cookie-setting by setting DISABLE_AUTH_COOKIE=true in env (then token is still returned in JSON).
+ * - Use COOKIE_DOMAIN to restrict cookie domain if needed (e.g. ".example.com").
+ * - COOKIE_MAX_AGE in seconds (defaults to 7 days).
+ */
+const shouldUseCookie = () => process.env.DISABLE_AUTH_COOKIE !== 'true';
+
+const buildCookieOptions = () => {
+  const isProd = process.env.NODE_ENV === 'production';
+  const maxAgeSeconds = parseInt(process.env.COOKIE_MAX_AGE || String(7 * 24 * 60 * 60), 10); // default 7 days
+  const cookieDomain = process.env.COOKIE_DOMAIN || undefined; // e.g. ".omsurl.xyz"
+  // Note: for cross-site cookies, SameSite must be 'none' and secure true
+  return {
+    httpOnly: true,
+    secure: isProd, // secure in production (requires https)
+    sameSite: 'none', // allow cross-site if needed (frontend and api on different origins)
+    maxAge: maxAgeSeconds * 1000,
+    path: '/', // root path
+    domain: cookieDomain // undefined when not set
+  };
+};
+
+const setAuthCookie = (res, token) => {
+  if (!shouldUseCookie()) return;
+  try {
+    const opts = buildCookieOptions();
+    // remove undefined props to avoid warnings
+    const safeOpts = {};
+    Object.keys(opts).forEach(k => {
+      if (opts[k] !== undefined) safeOpts[k] = opts[k];
+    });
+    res.cookie('token', token, safeOpts);
+  } catch (e) {
+    console.warn('[authController] Failed to set auth cookie:', e && e.message ? e.message : e);
+  }
+};
+
+const clearAuthCookie = (res) => {
+  if (!shouldUseCookie()) return;
+  try {
+    // When clearing, use same domain/sameSite/secure options so browser removes it
+    const opts = buildCookieOptions();
+    const safeOpts = {};
+    Object.keys(opts).forEach(k => {
+      if (opts[k] !== undefined) safeOpts[k] = opts[k];
+    });
+    // set maxAge to 0 to remove immediately
+    safeOpts.maxAge = 0;
+    res.clearCookie('token', safeOpts);
+  } catch (e) {
+    console.warn('[authController] Failed to clear auth cookie:', e && e.message ? e.message : e);
+  }
+};
+
+/**
  * Ensure DB is connected before running queries
  * Uses the cached connectDB() from config/database.js
  * Includes a light retry (3 attempts) with exponential backoff for transient blips
@@ -137,6 +194,13 @@ exports.register = async (req, res) => {
     // generate token
     const token = signToken({ userId: user._id, email: user.email, role: user.role });
 
+    // set cookie if configured
+    try {
+      setAuthCookie(res, token);
+    } catch (e) {
+      console.warn('[authController] Failed to set auth cookie after register:', e && e.message ? e.message : e);
+    }
+
     // remove sensitive before returning
     user.password = undefined;
 
@@ -209,6 +273,13 @@ exports.login = async (req, res) => {
       }, '24h');
       
       adminUser.password = undefined;
+
+      // set cookie
+      try {
+        setAuthCookie(res, token);
+      } catch (e) {
+        console.warn('[authController] Failed to set auth cookie for admin login:', e && e.message ? e.message : e);
+      }
       
       return res.json({
         success: true,
@@ -256,6 +327,13 @@ exports.login = async (req, res) => {
     await user.save().catch(() => {});
 
     const token = signToken({ userId: user._id, email: user.email, role: user.role });
+
+    // set cookie for browser
+    try {
+      setAuthCookie(res, token);
+    } catch (e) {
+      console.warn('[authController] Failed to set auth cookie after login:', e && e.message ? e.message : e);
+    }
 
     user.password = undefined;
 
@@ -666,6 +744,13 @@ exports.verifyEmail = async (req, res) => {
 
     const authToken = signToken({ userId: user._id, email: user.email, role: user.role });
 
+    // set cookie if configured
+    try {
+      setAuthCookie(res, authToken);
+    } catch (e) {
+      console.warn('[authController] Failed to set auth cookie after email verification:', e && e.message ? e.message : e);
+    }
+
     return res.json({
       success: true,
       message: 'Email verified successfully',
@@ -770,6 +855,13 @@ exports.adminLogin = async (req, res) => {
       }, '24h');
       
       adminUser.password = undefined;
+
+      // set cookie
+      try {
+        setAuthCookie(res, token);
+      } catch (e) {
+        console.warn('[authController] Failed to set auth cookie for admin login:', e && e.message ? e.message : e);
+      }
       
       return res.json({ 
         success: true, 
@@ -803,6 +895,14 @@ exports.adminLogin = async (req, res) => {
 
     const token = signToken({ userId: user._id, email: user.email, role: user.role }, '24h');
     user.password = undefined;
+
+    // set cookie
+    try {
+      setAuthCookie(res, token);
+    } catch (e) {
+      console.warn('[authController] Failed to set auth cookie for admin login:', e && e.message ? e.message : e);
+    }
+
     return res.json({ 
       success: true, 
       message: 'Admin login successful', 
@@ -826,6 +926,12 @@ exports.adminLogin = async (req, res) => {
 exports.logout = async (req, res) => {
   try {
     await ensureDbConnected();
+    // Clear auth cookie if set
+    try {
+      clearAuthCookie(res);
+    } catch (e) {
+      console.warn('[authController] Failed to clear auth cookie on logout:', e && e.message ? e.message : e);
+    }
     // Invalidate token via blacklist in production; here we just return success
     return res.json({ success: true, message: 'Logged out successfully' });
   } catch (err) {
