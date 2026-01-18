@@ -121,8 +121,12 @@ app.use((req, res, next) => {
       allowedOrigins.indexOf(requestOrigin) !== -1 ||
       requestOrigin.includes('.vercel.app') ||
       requestOrigin.includes('localhost') ||
-      requestOrigin.includes('127.0.0.1')
-    ) {
+      requestOrigin.includes('127.0.0.1') ||       
+      requestOrigin.endsWith('.com') ||
+      requestOrigin.endsWith('.xyz') ||
+      requestOrigin === 'https://omsurl.com' ||
+      requestOrigin === 'https://omsurl.xyz'
+     ) {
       // Echo the exact request origin (required when using credentials)
       originToAllow = requestOrigin;
     } else {
